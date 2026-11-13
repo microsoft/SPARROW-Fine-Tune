@@ -1,0 +1,188 @@
+# SPARROW YOLO experiment definition.
+#
+# This file is authoritative - every stage reads it:
+#   sparrow-yolo doctor  --config configs/example_experiment.yaml
+#   sparrow-yolo audit   --config configs/example_experiment.yaml
+#   sparrow-yolo prepare --config configs/example_experiment.yaml
+#   sparrow-yolo train   --config configs/example_experiment.yaml --watch
+#
+# Override any single value without editing the file:
+#   sparrow-yolo train -c configs/example_experiment.yaml --set training.batch=8
+#
+# Tuned defaults below assume the target machine: WSL2, 2x RTX PRO 4500 Blackwell
+# (32 GiB each, sm_120), GPU 0 also driving the display.
+
+dataset:
+  root: /workspace/datasets/Sub_Saharan
+  # Names the prepared dataset and the default run directory.
+  name: Sub_Saharan_v8
+
+  # Case-fold and strip class names. Leave this on: with it off, "Elephant" and
+  # "elephant" train as two separate classes.
+  normalise_class_names: true
+
+  # Decode every image's pixel data during the audit, not just the header.
+  # Slower; worth doing once when onboarding a dataset to catch truncated files.
+  deep_image_check: false
+
+  # Which blank frames to train on as negatives. Empty camera-trap frames are the
+  # most effective way to cut false positives, but blanks vary in trustworthiness:
+  #
+  #   reviewed  images with an empty XML, plus anything under
+  #             confirmed_blank_dirs below. (default)
+  #   all       also include images with no XML and no declaration. Those are
+  #             ambiguous: either a genuine blank the tagger did not write a file
+  #             for, or an image nobody has tagged yet. Training an untagged
+  #             animal photo as a negative teaches the model that animals are
+  #             background - worse than dropping it.
+  #   none      no negatives at all.
+  #
+  # `sparrow-yolo audit` prints the count of each kind for your dataset.
+  background_policy: reviewed
+
+  # Folders you have personally confirmed contain only empty frames. Their images
+  # count as reviewed blanks even with no XML. Paths are relative to root above,
+  # and globs work. Nothing is written to the dataset, so this is safe on a
+  # read-only mount.
+  #
+  # confirmed_blank_dirs:
+  #   - blanks
+  #   - 2024/empty_frames
+  #   - "*/no_animals"
+  #
+  # Keep such images in their OWN folder rather than mixed in with tagged ones:
+  # once mixed, a genuine blank is indistinguishable from an untagged image and
+  # this setting cannot separate them.
+  confirmed_blank_dirs: []
+
+  drop_classes: []
+  # Classes with fewer boxes than this are excluded from the class map entirely.
+  # A class with a handful of examples cannot be learned and distorts the split.
+  min_boxes_per_class: 0
+
+paths:
+  prepared_root: /workspace/prepared
+  runs_root: /workspace/runs
+
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+  seed: 42
+
+  # rarest  - label each image by its least common class, so rare classes are
+  #           spread across splits instead of landing entirely in one (default)
+  # dominant- label by the most common class
+  # none    - no stratification
+  stratify: rarest
+
+  # parent_dir keeps images from the same folder in the same split. Set this for
+  # camera-trap data with burst sequences: near-duplicate frames split across
+  # train and val inflate validation metrics badly.
+  group_by: none
+
+prepare:
+  # auto tries hardlink, then symlink, then copy. Hardlinking is instant and uses
+  # no extra disk; copying a large dataset doubles storage and takes minutes.
+  link_mode: auto
+  overwrite: false
+  # Keep class ids stable across re-preparations so older checkpoints still line
+  # up. New classes are appended with new ids rather than renumbering.
+  reuse_class_map: true
+
+  # Keep existing images in the split they were assigned last time, recorded in
+  # prepared/<project>/splits.json. Only new images are placed, and they go to
+  # whichever splits are furthest below target so the ratio still converges.
+  #
+  # This is what makes model versions comparable. Without it, adding images
+  # reshuffles everything: some of v1's test images become v2's training data,
+  # and v2's test score is inflated for reasons that have nothing to do with the
+  # model. Set false only when deliberately starting a fresh evaluation.
+  reuse_split: true
+
+  workers: null   # null = derive from CPU count
+
+training:
+  # TRANSFER LEARNING. A ".pt" name loads COCO-pretrained weights and fine-tunes
+  # from them - that is what makes this transfer learning. A ".yaml" (e.g.
+  # yolo11l.yaml) would build the same architecture with random weights and train
+  # from scratch, which needs far more data and time. Keep the .pt.
+  #
+  # The backbone and neck transfer intact; the detection head is rebuilt for your
+  # class count, so your class names do not need to exist in COCO. All layers are
+  # trainable by default (full fine-tuning), which is the right default when you
+  # have thousands of tagged images.
+  #
+  # Checkpoints are baked into the image at /workspace/weights, so a run starts
+  # immediately and works offline. An absolute path here is used as-is.
+  #
+  # yolo11l is the sweet spot on 32 GiB at 1024px. yolo11x fits but roughly
+  # halves the batch and throughput for a small accuracy gain.
+  model: yolo11l.pt
+  imgsz: 1024
+  epochs: 100
+
+  # auto = Ultralytics AutoBatch on one GPU (measured), or a VRAM-sized estimate
+  # on several. Never leave this as -1 with multiple GPUs: AutoBatch is
+  # single-GPU only and silently falls back to a fixed 16, which is what killed
+  # the earlier `batch: 16, device: 0,1` run in this repo.
+  batch: auto
+
+  # "0,1" uses both GPUs via DDP. `sparrow-yolo doctor` runs a real NCCL
+  # all_reduce first - if that fails on WSL2, fall back to "0" (or "1", which
+  # has no display attached).
+  device: "0,1"
+
+  # auto derives from CPU count. This is per GPU: total processes = workers x GPUs.
+  workers: auto
+
+  # EARLY STOPPING. Training halts if fitness has not improved for this many
+  # consecutive epochs. best.pt keeps the best checkpoint regardless, so a long
+  # `epochs` costs nothing but time when patience is doing its job.
+  #
+  # One interaction to watch: close_mosaic (below) turns mosaic augmentation off
+  # for the final 10 epochs, which usually produces a step up in accuracy. If
+  # early stopping fires before then you never see it. With epochs: 100 and
+  # patience: 30 that is quite possible - if a run keeps stopping around epoch
+  # 50-60, try raising patience rather than lowering epochs.
+  patience: 30
+  amp: true
+  seed: 0
+
+  # deterministic=true costs roughly 10% throughput by disabling cuDNN
+  # autotuning. Off by default; turn it on when comparing runs exactly.
+  deterministic: false
+
+  # false | true (RAM) | "disk". RAM caching is a large speedup but needs the
+  # whole dataset resident - unrealistic for camera-trap data at 1024px.
+  cache: false
+
+  # Continue an interrupted run from its last.pt, keeping optimiser state and
+  # epoch count. Requires --run pointing at the existing run directory:
+  #   sparrow-yolo train -c <config> --run /workspace/runs/Sub_Saharan_v8 --set training.resume=true
+  # This is different from starting a fresh run initialised from an earlier
+  # checkpoint - for that, set `model` to an absolute path to a .pt and leave
+  # resume false.
+  resume: false
+
+  # Anything here is passed straight through to Ultralytics model.train().
+  extra:
+    cos_lr: true        # smoother convergence over a long schedule
+    close_mosaic: 10    # disable mosaic for the final epochs
+    # optimizer: auto
+    # lr0: 0.01         # lower (e.g. 0.002) if fine-tuning a small dataset
+    # multi_scale: false
+
+    # freeze: 10
+    #   Freezes the first 10 layers (the backbone) so only the neck and head
+    #   train. Faster and less prone to overfitting on a small or narrow dataset,
+    #   but caps accuracy: camera-trap imagery (IR, night, motion blur) looks
+    #   quite unlike COCO, so the backbone usually benefits from adapting.
+    #   Leave it off unless you have only a few hundred tagged images.
+
+export:
+  onnx: true
+  opset: null      # null lets Ultralytics choose a valid opset for the model
+  dynamic: false
+  half: false
+  simplify: true

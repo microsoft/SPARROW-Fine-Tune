@@ -1,0 +1,28 @@
+# Line endings are decided here, not by whatever core.autocrlf a cloner happens
+# to have set. The repository is edited on Windows and executed on Linux, so a
+# checkout that helpfully converts to CRLF breaks things in ways that read as
+# unrelated failures.
+* text=auto
+
+# These are executed by a Linux shell inside the container. With CRLF, bash
+# fails on the shebang with "bad interpreter: /usr/bin/env bash^M", and Docker
+# mangles line continuations in the Dockerfile.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Served to a browser and read by Python; keep them consistent with the above.
+*.py            text eol=lf
+*.html          text eol=lf
+*.js            text eol=lf
+*.css           text eol=lf
+
+# Never normalise these - a stray CRLF substitution corrupts them.
+*.pt            binary
+*.onnx          binary
+*.engine        binary
+*.npy           binary
+*.jpg           binary
+*.jpeg          binary
+*.png           binary

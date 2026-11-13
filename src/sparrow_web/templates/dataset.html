@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}Training set · {{ project.name }}{% endblock %}
+{% block content %}
+
+<div class="row" style="margin-bottom:16px">
+  <a class="btn" href="{{ url_for('project', slug=project.slug) }}">← Back</a>
+  <div>
+    <h1 style="margin:0">Training set</h1>
+    <div class="small muted">{{ project.name }}</div>
+  </div>
+</div>
+
+{% if not snapshot %}
+  <div class="card empty">
+    <h2>Scan the dataset first</h2>
+    <p>There is nothing to build a training set from yet.</p>
+    <a class="btn primary" href="{{ url_for('review', slug=project.slug) }}">Go to data health</a>
+  </div>
+{% else %}
+
+{% set prep_step = (steps | selectattr('id', 'equalto', 'prepare') | list | first) %}
+
+<div class="grid cols-2">
+  <div class="card">
+    <h3>Build</h3>
+
+    {% if prep_step.state == 'running' %}
+      <div class="notice">
+        <strong>Building…</strong>
+        <div id="prep-progress" class="small" style="margin-top:6px">Starting</div>
+        <div class="bar" style="margin-top:8px"><span id="prep-bar" style="width:0%"></span></div>
+      </div>
+    {% else %}
+
+      {% if prep_step.state == 'stale' %}
+        <div class="notice warn" style="margin-bottom:14px">
+          The dataset has changed since this training set was built. Rebuilding keeps
+          every existing image in the split it was already in, so the next model stays
+          comparable to the last one.
+        </div>
+      {% endif %}
+
+      <form method="post" action="{{ url_for('start_prepare', slug=project.slug) }}"
+            id="prep-form">
+        <div class="row" style="gap:10px; align-items:flex-end">
+          <div style="flex:1"><label for="train">Train %</label>
+            <input type="text" id="train" name="train" value="{{ config.split.train }}"></div>
+          <div style="flex:1"><label for="val">Validation %</label>
+            <input type="text" id="val" name="val" value="{{ config.split.val }}"></div>
+          <div style="flex:1"><label for="test">Test %</label>
+            <input type="text" id="test" name="test" value="{{ config.split.test }}"></div>
+        </div>
+        <p class="small muted" style="margin:6px 0 14px">
+          Given as fractions and they must total 1.0. Validation guides training;
+          test is held back so the score means something.
+        </p>
+
+        <div class="field">
+          <label for="background_policy">Blank frames</label>
+          <select id="background_policy" name="background_policy">
+            <option value="reviewed" {{ 'selected' if config.dataset.background_policy == 'reviewed' }}>
+              Reviewed only — {{ (snapshot.blank_empty_xml + snapshot.blank_confirmed_dir)|thousands }} frames
+            </option>
+            <option value="all" {{ 'selected' if config.dataset.background_policy == 'all' }}>
+              All blank frames — {{ snapshot.n_background|thousands }} frames
+            </option>
+            <option value="none" {{ 'selected' if config.dataset.background_policy == 'none' }}>
+              None
+            </option>
+          </select>
+          <p class="small muted" style="margin-top:6px">
+            {{ snapshot.blank_unknown|thousands }} images have no annotation at all.
+            They are excluded unless you choose “all”, because an untagged animal photo
+            used as background teaches the model that animals are nothing.
+          </p>
+        </div>
+
+        <div class="field">
+          <label for="group_by">Keep related images together</label>
+          <select id="group_by" name="group_by">
+            <option value="none" {{ 'selected' if config.split.group_by == 'none' }}>No grouping</option>
+            <option value="parent_dir" {{ 'selected' if config.split.group_by == 'parent_dir' }}>
+              By folder
+            </option>
+          </select>
+          <p class="small muted" style="margin-top:6px">
+            Camera traps fire in bursts, so consecutive frames are near-identical.
+            If your folders match bursts or camera sites, grouping stops the same
+            animal appearing in both training and validation — which otherwise makes
+            the score look better than it is.
+          </p>
+        </div>
+
+        <button class="btn primary" type="submit" id="prep-submit">
+          {{ 'Rebuild training set' if latest_prepared else 'Build training set' }}
+        </button>
+      </form>
+    {% endif %}
+  </div>
+
+  <div>
+    <div class="card">
+      <h3>Source</h3>
+      <div class="stats" style="margin-top:10px">
+        {{ stat('Images', snapshot.n_readable|thousands) }}
+        {{ stat('Boxes', snapshot.n_boxes|thousands) }}
+        {{ stat('Species', snapshot.n_classes) }}
+      </div>
+      <p class="small muted" style="margin-top:10px">
+        From the scan of {{ snapshot.created_at }}.
+        <a href="{{ url_for('review', slug=project.slug) }}">Data health</a>
+      </p>
+    </div>
+
+    {% if latest_prepared %}
+    <div class="card">
+      <h3>Current training set</h3>
+      <div class="stats" style="margin-top:10px">
+        {{ stat('Train', latest_prepared.n_train|thousands) }}
+        {{ stat('Validation', latest_prepared.n_val|thousands) }}
+        {{ stat('Test', latest_prepared.n_test|thousands) }}
+      </div>
+      <a class="btn primary" href="{{ url_for('train_page', slug=project.slug) }}"
+         style="margin-top:14px">Set up training →</a>
+      <table style="margin-top:12px">
+        <tbody>
+          <tr><td>Species</td><td class="num">{{ latest_prepared.n_classes }}</td></tr>
+          <tr><td>Verified</td>
+            <td class="num">
+              {% if latest_prepared.verify_ok %}<span class="badge good">passed</span>
+              {% else %}<span class="badge bad">problems</span>{% endif %}
+            </td></tr>
+          <tr><td>Built</td><td class="num small muted">{{ latest_prepared.created_at }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const form = document.getElementById('prep-form');
+  if (form) {
+    form.addEventListener('submit', function () {
+      // Building writes tens of thousands of files; a second submission would
+      // queue a duplicate.
+      const b = document.getElementById('prep-submit');
+      b.disabled = true;
+      b.textContent = 'Starting…';
+    });
+  }
+
+  Sparrow.on('job.progress', function (d) {
+    if (d.kind !== 'prepare') return;
+    const label = document.getElementById('prep-progress');
+    const bar = document.getElementById('prep-bar');
+    if (label && d.total) {
+      label.textContent = (d.phase || 'Working') + ' — ' +
+        d.current.toLocaleString() + ' of ' + d.total.toLocaleString();
+      if (bar) bar.style.width = (100 * d.current / d.total).toFixed(1) + '%';
+    }
+  });
+  Sparrow.on('prepared.created', function () { location.reload(); });
+  Sparrow.on('job.updated', function () { setTimeout(function () { location.reload(); }, 600); });
+  Sparrow.connect(['jobs', 'project:{{ project.id }}']);
+</script>
+{% endblock %}

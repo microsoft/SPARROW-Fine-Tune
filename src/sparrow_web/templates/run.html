@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat, gpu_cards %}
+{% block title %}{{ run.name }} · {{ project.name }}{% endblock %}
+{% block content %}
+
+<div class="row" style="margin-bottom:16px">
+  <div>
+    <h1>{{ run.name }}</h1>
+    <div class="small muted"><a href="{{ url_for('project', slug=project.slug) }}">{{ project.name }}</a></div>
+  </div>
+  <span class="spacer"></span>
+  <span id="state" class="badge {{ 'good' if run.state == 'completed' else ('accent' if run.state in ('running','starting') else ('bad' if run.state in ('failed','died') else '')) }}">{{ run.state }}</span>
+  {% if run.state in ('running', 'starting') %}<span class="live">Live</span>
+  {% else %}
+    <a class="btn" href="{{ url_for('train_page', slug=project.slug) }}">Set up another run</a>
+  {% endif %}
+</div>
+
+{% if run.state in ('failed', 'died') and run.error %}
+<div class="notice bad" style="margin-bottom:16px">
+  <strong>This run did not finish.</strong>
+  <div class="small" style="margin-top:6px">{{ run.error }}</div>
+</div>
+{% endif %}
+
+{% if run.stopped_early %}
+<div class="notice" style="margin-bottom:16px">
+  <strong>Stopped early at epoch {{ run.epochs_completed }} of {{ run.epochs }}.</strong>
+  It had not improved for {{ run.epochs_completed - (run.best_epoch or 0) }} epochs.
+  The best weights, from epoch {{ run.best_epoch }}, were kept.
+</div>
+{% endif %}
+
+<div class="stats" style="margin-bottom:16px">
+  {{ stat('mAP@50-95', '<span id="m-map50_95">-</span>'|safe) }}
+  {{ stat('mAP@50', '<span id="m-map50">-</span>'|safe) }}
+  {{ stat('Precision', '<span id="m-precision">-</span>'|safe) }}
+  {{ stat('Recall', '<span id="m-recall">-</span>'|safe) }}
+  {# The whole concatenation needs marking safe, not just its last term: `|safe`
+     binds tighter than `~`, so applying it to the tail escaped the rest. #}
+  {{ stat('Epoch', ('<span id="m-epoch">' ~ (run.epoch or 0) ~ '</span>/'
+                    ~ (run.epochs or '?'))|safe) }}
+  {{ stat('Time left', '<span id="m-eta">-</span>'|safe) }}
+</div>
+
+<div class="grid cols-2">
+  <div>
+    <div class="card">
+      <h3>Accuracy</h3>
+      <canvas id="chart-acc" class="chart"></canvas>
+      <p class="small muted">
+        One point per epoch. On a large dataset an epoch takes many minutes, so this
+        chart moves slowly — GPU activity below is the live signal.
+      </p>
+    </div>
+    <div class="card">
+      <h3>Losses</h3>
+      <canvas id="chart-loss" class="chart"></canvas>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <div class="row"><h3>Hardware</h3><span class="spacer"></span><span class="live">Live</span></div>
+      {{ gpu_cards([]) }}
+    </div>
+    <div class="card">
+      <h3>Settings used</h3>
+      <p class="small muted" style="margin:4px 0 10px">
+        Recorded when the run was queued. This is the run, not the project — editing
+        the project's defaults later does not rewrite what happened here.
+      </p>
+      <table>
+        <tbody>
+          <tr><td>Started from</td>
+            <td class="num small mono">{{ run.base_weights or run.base_kind }}</td></tr>
+          {% for key, value in chosen %}
+            <tr><td>{{ key }}</td><td class="num small mono">{{ value }}</td>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if resolved_note %}
+        <p class="small muted" style="margin-top:10px">{{ resolved_note }}</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3>Log</h3>
+      <div id="log" class="log">Loading…</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SERIES = {{ series | tojson }};
+const RUN_ID = {{ run.id }};
+
+/* Minimal canvas line chart. The point counts here are small (one per epoch),
+   and drawing them directly avoids shipping a charting library for six lines. */
+function drawChart(canvas, series, opts) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const css = getComputedStyle(document.documentElement);
+  const grid = css.getPropertyValue('--grid').trim();
+  const muted = css.getPropertyValue('--ink-muted').trim();
+  const pad = { l: 44, r: 90, t: 10, b: 24 };
+
+  const entries = Object.entries(series).filter(([, pts]) => pts && pts.length);
+  if (!entries.length) {
+    ctx.fillStyle = muted; ctx.font = '12px system-ui';
+    ctx.fillText('Waiting for the first epoch…', pad.l, h / 2);
+    return;
+  }
+
+  let xMax = 1, yMin = Infinity, yMax = -Infinity;
+  entries.forEach(([, pts]) => pts.forEach(([x, y]) => {
+    if (x > xMax) xMax = x;
+    if (y < yMin) yMin = y;
+    if (y > yMax) yMax = y;
+  }));
+  if (opts.zeroToOne) { yMin = 0; yMax = 1; }
+  if (yMax === yMin) { yMax = yMin + 1; }
+
+  const X = x => pad.l + (x / xMax) * (w - pad.l - pad.r);
+  const Y = y => h - pad.b - ((y - yMin) / (yMax - yMin)) * (h - pad.t - pad.b);
+
+  ctx.strokeStyle = grid; ctx.lineWidth = 1; ctx.font = '10px system-ui';
+  for (let i = 0; i <= 4; i++) {
+    const v = yMin + (yMax - yMin) * i / 4, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.fillStyle = muted; ctx.fillText(v.toFixed(2), 4, y + 3);
+  }
+
+  entries.forEach(([key, pts], i) => {
+    ctx.strokeStyle = opts.colors[key] || '#888';
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash(key.startsWith('val_') ? [4, 3] : []);
+    ctx.beginPath();
+    pts.forEach(([x, y], j) => j ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const last = pts[pts.length - 1];
+    ctx.fillStyle = opts.colors[key] || '#888';
+    ctx.fillText(opts.labels[key] || key, w - pad.r + 6, Y(last[1]) + 3);
+  });
+}
+
+const ACC = {
+  colors: { map50_95: '#3987e5', map50: '#d95926', precision: '#199e70', recall: '#c98500' },
+  labels: { map50_95: 'mAP@50-95', map50: 'mAP@50', precision: 'Precision', recall: 'Recall' },
+  zeroToOne: true
+};
+const LOSS = {
+  colors: { train_box_loss: '#3987e5', train_cls_loss: '#d95926', train_dfl_loss: '#199e70',
+            val_box_loss: '#3987e5', val_cls_loss: '#d95926', val_dfl_loss: '#199e70' },
+  labels: { train_box_loss: 'box', train_cls_loss: 'cls', train_dfl_loss: 'dfl',
+            val_box_loss: 'box (val)', val_cls_loss: 'cls (val)', val_dfl_loss: 'dfl (val)' }
+};
+
+function pick(series, keys) {
+  const out = {};
+  keys.forEach(k => { if (series[k]) out[k] = series[k]; });
+  return out;
+}
+
+function redraw() {
+  drawChart(document.getElementById('chart-acc'),
+            pick(SERIES, Object.keys(ACC.colors)), ACC);
+  drawChart(document.getElementById('chart-loss'),
+            pick(SERIES, Object.keys(LOSS.colors)), LOSS);
+}
+
+function setHeadline(series) {
+  ['map50_95', 'map50', 'precision', 'recall'].forEach(k => {
+    const el = document.getElementById('m-' + k);
+    const pts = series[k];
+    if (el && pts && pts.length) el.textContent = pts[pts.length - 1][1].toFixed(3);
+  });
+}
+
+redraw();
+setHeadline(SERIES);
+window.addEventListener('resize', redraw);
+
+Sparrow.on('run.metrics', function (d) {
+  if (d.run_id !== RUN_ID) return;
+  (d.rows || []).forEach(row => {
+    Object.entries(row).forEach(([k, v]) => {
+      if (k === 'epoch') return;
+      (SERIES[k] = SERIES[k] || []).push([row.epoch, v]);
+    });
+    document.getElementById('m-epoch').textContent = row.epoch;
+  });
+  if (d.eta) document.getElementById('m-eta').textContent =
+    fmtDuration(d.eta.seconds_remaining);
+  setHeadline(SERIES);
+  redraw();
+});
+
+Sparrow.on('run.status', function (d) {
+  if (d.run_id !== RUN_ID) return;
+  const el = document.getElementById('state');
+  el.textContent = d.state;
+  if (['completed', 'failed', 'died', 'stopped'].includes(d.state)) {
+    setTimeout(() => location.reload(), 800);
+  }
+});
+
+Sparrow.on('gpu.sample', function (data) {
+  const host = document.querySelector('#gpus');
+  if (!host) return;
+  host.innerHTML = (data.gpus || []).map(g =>
+    '<div class="gpu"><div class="head"><span class="n">GPU ' + g.index + '</span>' +
+    '<span class="muted small">' + g.name + '</span><span class="spacer"></span>' +
+    '<span class="small mono">' + (g.utilization_pct == null ? '-' : g.utilization_pct) + '%</span></div>' +
+    '<div class="bar"><span style="width:' + (g.utilization_pct || 0) + '%"></span></div>' +
+    '<div class="row small muted" style="gap:14px"><span>' +
+    (g.used_mb / 1024).toFixed(1) + ' / ' + Math.round(g.total_mb / 1024) + ' GiB</span><span>' +
+    (g.temperature_c == null ? '-' : g.temperature_c) + '°C</span><span>' +
+    (g.power_w == null ? '-' : Math.round(g.power_w)) + ' W</span></div></div>'
+  ).join('') || '<p class="muted small">No GPUs detected.</p>';
+});
+
+// The log is polled rather than streamed: Ultralytics is chatty enough to drown
+// out the metric events on a shared stream.
+let logOffset = 0;
+function pollLog() {
+  fetch('/api/runs/' + RUN_ID + '/log?offset=' + logOffset)
+    .then(r => r.json())
+    .then(d => {
+      const el = document.getElementById('log');
+      if (logOffset === 0) el.textContent = '';
+      if (d.text) {
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        el.textContent += d.text;
+        if (atBottom) el.scrollTop = el.scrollHeight;
+      }
+      logOffset = d.next_offset;
+    })
+    .catch(() => {});
+}
+pollLog();
+setInterval(pollLog, 3000);
+
+Sparrow.connect(['gpu', 'jobs', 'run:{{ run.id }}']);
+</script>
+{% endblock %}

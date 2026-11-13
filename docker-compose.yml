@@ -1,0 +1,119 @@
+# Copy .env.example to .env and set DATASET_HOST_PATH before using this.
+#   docker compose up -d
+#   docker compose exec sparrow-yolo sparrow-yolo doctor
+services:
+  sparrow-yolo:
+    build:
+      context: .
+      args:
+        # Pin a known-good pair here once a build is verified, e.g.
+        # TORCH_SPEC: "torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0"
+        TORCH_SPEC: ${TORCH_SPEC:-torch torchvision torchaudio}
+    image: sparrow-yolo-workbench:latest
+    container_name: sparrow-yolo-workbench
+
+    ports:
+      # Loopback-only throughout. There is no authentication, and this process
+      # spawns subprocesses as root — it must not be reachable from the network.
+      - "127.0.0.1:8080:8080"     # the workbench web app
+
+    # No `command:` here — the image's CMD already starts the workbench, so
+    # Docker supervises it: it starts with `docker compose up`, restarts if it
+    # dies, and its output goes to `docker compose logs`. Detaching a server by
+    # hand inside an exec session is fragile; it dies with the session in ways
+    # that are tedious to diagnose.
+
+    environment:
+      # src/ is bind-mounted below so edits need no rebuild, and that copy must
+      # win over whatever the image was built with.
+      PYTHONPATH: /workspace/src
+      SPARROW_STATE_DIR: /workspace/runs/_webstate
+      # Everything under /browse is selectable, plus the legacy path.
+      SPARROW_DATASET_SEARCH_ROOTS: /browse:/workspace/datasets
+      SPARROW_PREPARED_ROOT: /workspace/prepared
+      SPARROW_RUNS_ROOT: /workspace/runs
+      SPARROW_ANNOTATIONS_ROOT: /workspace/annotations
+      # Where a finished annotation batch may be written. Separate from the
+      # browsable roots on purpose: those are read-only so a dataset scan can
+      # never write, and export is the one action that can.
+      SPARROW_EXPORT_ROOTS: /write
+      SPARROW_PORT: "8080"
+      NCCL_P2P_DISABLE: "1"
+      NCCL_IB_DISABLE: "1"
+      TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+      # PYTORCH_CUDA_ALLOC_CONF is deliberately NOT set to expandable_segments:True.
+      # That option needs CUDA virtual memory APIs which WSL2 does not support,
+      # and breaks every allocation with "CUDA driver error: unknown error".
+      OMP_NUM_THREADS: "4"
+
+    volumes:
+      # Browsable storage, all read-only. A container can only offer folders it
+      # can actually see, so the picker is limited by what is mounted here — this
+      # is what makes "choose any folder on any drive" possible.
+      #
+      # `:ro` is not a detail. The pipeline never writes to your images or
+      # annotations, and mounting read-only makes Docker enforce that rather than
+      # leaving it as a promise in the code.
+      #
+      # Add a line per drive you keep data on. Windows drives appear under /mnt
+      # in WSL, so D: is /mnt/d.
+      - "${DRIVE_C:-/mnt/c}:/browse/c:ro"
+      - "${DRIVE_D:-/mnt/d}:/browse/d:ro"
+      - "${LINUX_HOME:-/home}:/browse/home:ro"
+      # Kept so existing CLI configs that say /workspace/datasets keep working.
+      - "${DATASETS_HOST_ROOT:-/mnt/d/Tagged}:/workspace/datasets:ro"
+      # The same drives again, read-write, under a different prefix. Only the
+      # annotation export uses these, and it validates against its own
+      # allowlist (SPARROW_EXPORT_ROOTS) rather than the browsable one. Two
+      # mounts rather than dropping `:ro` above, so "this app can write here"
+      # is a visible line in this file instead of a property of the code.
+      - "${DRIVE_C:-/mnt/c}:/write/c"
+      - "${DRIVE_D:-/mnt/d}:/write/d"
+      # Default to the repo, but overridable: if the checkout sits on a Windows
+      # drive, point these at the Linux filesystem so prepared/ can use symlinks
+      # instead of silently copying the whole dataset, and so checkpoint writes
+      # do not cross the drvfs bridge.
+      #   RUNS_PATH=/srv/sparrow/runs
+      #   PREPARED_PATH=/srv/sparrow/prepared
+      - "${RUNS_PATH:-./runs}:/workspace/runs"
+      # Must be mounted. With --rm and no mount, the prepared dataset dies with
+      # the container while runs/*/args.yaml still points at it, so a finished
+      # model cannot be re-evaluated without a full re-prepare.
+      - "${PREPARED_PATH:-./prepared}:/workspace/prepared"
+      # Annotation batches: copied images plus the XML written for them.
+      # Put this on the Linux filesystem for the same reason as prepared/.
+      - "${ANNOTATIONS_PATH:-./annotations}:/workspace/annotations"
+      - "./configs:/workspace/configs"
+      # Live source, so editing src/ does not require an image rebuild.
+      - "./src:/workspace/src"
+      # So `docker compose exec sparrow-yolo pytest tests -q` works against
+      # the edited tree rather than whatever the image was built with.
+      # Read-only: the suite writes only to tmp_path.
+      - "./tests:/workspace/tests:ro"
+      # Persists downloaded pretrained weights across container restarts.
+      - "ultralytics-cache:/workspace/.ultralytics"
+
+    # DDP and the dataloader workers need real shared memory; Docker's 64 MiB
+    # default kills workers partway through the first epoch.
+    ipc: host
+    shm_size: "32gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    init: true
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  ultralytics-cache:

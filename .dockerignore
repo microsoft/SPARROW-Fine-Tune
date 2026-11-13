@@ -1,0 +1,26 @@
+# Without this, `COPY . /workspace` bakes checkpoints, prepared datasets, and
+# any images sitting in datasets/ into the image - gigabytes, and invalidating
+# the build cache on every training run.
+runs/
+prepared/
+datasets/
+annotations/
+*.pt
+*.onnx
+*.engine
+*.npy
+
+.git/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+
+.local/
+.cache/

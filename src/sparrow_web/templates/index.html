@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% from "_macros.html" import gpu_cards, stat %}
+{% block content %}
+
+<div class="row" style="margin-bottom:20px">
+  <h1>Projects</h1>
+  <span class="spacer"></span>
+  <a class="btn primary" href="{{ url_for('new_project_form') }}">New project</a>
+</div>
+
+<div class="grid cols-2">
+  <div>
+    {% if not projects %}
+      <div class="card empty">
+        <h2>No projects yet</h2>
+        <p>A project is one dataset and the models trained from it. Point it at a
+           folder of images and their annotations to get started.</p>
+        <a class="btn primary" href="{{ url_for('new_project_form') }}">Create your first project</a>
+      </div>
+    {% endif %}
+
+    {% for p in projects %}
+    <div class="card">
+      <div class="row">
+        <div>
+          <h2><a href="{{ url_for('project', slug=p.slug) }}">{{ p.name }}</a></h2>
+          <div class="small muted mono">{{ p.dataset_root }}</div>
+        </div>
+        <span class="spacer"></span>
+        {% if p.model %}<span class="badge accent">v{{ p.model.version }}</span>{% endif %}
+      </div>
+
+      {% if p.snapshot %}
+      <div class="stats" style="margin-top:14px">
+        {{ stat('Images', p.snapshot.n_images|thousands) }}
+        {{ stat('Boxes', p.snapshot.n_boxes|thousands) }}
+        {{ stat('Species', p.snapshot.n_classes) }}
+      </div>
+      {% else %}
+        <p class="small muted" style="margin-top:12px">Not scanned yet.</p>
+      {% endif %}
+
+      <div class="row small muted" style="margin-top:12px; gap:6px">
+        {% for s in p.steps %}
+          <span class="badge {{ 'good' if s.state == 'done' else ('accent' if s.state == 'running' else ('warn' if s.state == 'stale' else '')) }}">{{ s.label }}</span>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div>
+    <div class="card">
+      <div class="row"><h3>Hardware</h3><span class="spacer"></span>
+        <span class="live">Live</span></div>
+      {{ gpu_cards(gpus) }}
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Sparrow.on('gpu.sample', function (data) {
+    (data.gpus || []).forEach(function (g) {
+      var el = document.querySelector('[data-gpu="' + g.index + '"]');
+      if (!el) return;
+      var util = g.utilization_pct == null ? '-' : g.utilization_pct;
+      el.querySelector('[data-field=util]').textContent = util + '%';
+      el.querySelector('[data-field=utilbar]').style.width = (g.utilization_pct || 0) + '%';
+      el.querySelector('[data-field=mem]').textContent =
+        (g.used_mb / 1024).toFixed(1) + ' / ' + Math.round(g.total_mb / 1024) + ' GiB';
+      el.querySelector('[data-field=temp]').textContent =
+        (g.temperature_c == null ? '-' : g.temperature_c) + '°C';
+      el.querySelector('[data-field=power]').textContent =
+        (g.power_w == null ? '-' : Math.round(g.power_w)) + ' W';
+    });
+  });
+  Sparrow.connect(['gpu']);
+</script>
+{% endblock %}

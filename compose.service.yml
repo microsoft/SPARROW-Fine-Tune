@@ -1,0 +1,139 @@
+# Sparrow fine-tuning service.
+#   cp .env.service.example .env.service   # then set passwords/tokens
+#   docker compose -f compose.service.yml --env-file .env.service up -d --build
+#   docker compose -f compose.service.yml --env-file .env.service --profile gpu up -d   # adds the GPU worker
+#   docker compose -f compose.service.yml exec api sparrow-finetune create-user admin
+# The legacy YOLO workbench keeps its own docker-compose.yml.
+name: sparrow-finetune
+
+x-service-env: &service-env
+  # The app builds the DSN from these parts and percent-encodes the password, so it may
+  # contain characters such as @ : / % that would break a hand-written URL.
+  SPARROW_FT_DB_HOST: postgres
+  SPARROW_FT_DB_PORT: "5432"
+  SPARROW_FT_DB_NAME: sparrow_finetune
+  SPARROW_FT_DB_USER: sparrow
+  SPARROW_FT_DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+  SPARROW_FT_STATEMENT_TIMEOUT_MS: ${SPARROW_FT_STATEMENT_TIMEOUT_MS:-60000}
+  # Studio routes take an integer project id: reject anything else with 422.
+  SPARROW_FT_STUDIO_PROJECT_IDS: numeric
+  SPARROW_FT_DATA_DIR: /data
+  SPARROW_FT_API_TOKENS: ${SPARROW_FT_API_TOKENS:-}
+  # Sign-in is off: the app is opened from Sparrow Studio. Set 0 to require accounts again.
+  SPARROW_FT_AUTH_DISABLED: ${SPARROW_FT_AUTH_DISABLED:-1}
+  SPARROW_FT_EMBEDDER: ${SPARROW_FT_EMBEDDER:-}
+  # Container path of local weights (timm/<model>/, stock model packages); mount it in an override.
+  # Assisted labelling's default detector, MegaDetector v6 (compact), is the Sparrow engine package
+  # MDV6-yolov10-c/ (1/model.onnx + labels.txt) under this dir, mounted into the api service, e.g.
+  #   api: {volumes: ["/path/to/MDV6-yolov10-c:/weights/MDV6-yolov10-c:ro"]}
+  # Without it the web app lists MegaDetector as not installed and offers trained detectors only.
+  # Stock classifier packages (e.g. AI4G-Amazon-V2/, with manifest.toml) go in the api service (the
+  # training form lists them) and in the workers (they run the comparison), at the same path.
+  SPARROW_FT_WEIGHTS_DIR: ${SPARROW_FT_WEIGHTS_DIR:-}
+  SPARROW_FT_STUDIO_URL: ${SPARROW_FT_STUDIO_URL:-}
+  SPARROW_FT_STUDIO_TOKEN: ${SPARROW_FT_STUDIO_TOKEN:-}
+  SPARROW_FT_COOKIE_SECURE: ${SPARROW_FT_COOKIE_SECURE:-0}
+  SPARROW_FT_SESSION_HOURS: ${SPARROW_FT_SESSION_HOURS:-12}
+  # Scheduling. With the gpu profile, set GPU_PIPELINES=yolo_detector,conventional_classifier so
+  # those jobs wait for worker-gpu instead of training on worker-cpu. MAX_RUNNING_PER_USER caps
+  # one user's running jobs (0 = no cap); freed workers always go to the user running fewest.
+  SPARROW_FT_GPU_PIPELINES: ${SPARROW_FT_GPU_PIPELINES:-}
+  SPARROW_FT_MAX_RUNNING_PER_USER: ${SPARROW_FT_MAX_RUNNING_PER_USER:-0}
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile.service
+    # TORCH_VARIANT=cpu builds the CPU-only image from requirements-cpu.txt (FT-12).
+    args:
+      TORCH_VARIANT: ${TORCH_VARIANT:-cu128}
+  # Untagged builds are named after an explicitly set TORCH_VARIANT (e.g. TORCH_VARIANT=cpu ->
+  # sparrow-finetune:cpu), so a CPU build never overwrites the CUDA `latest` used by worker-gpu.
+  image: sparrow-finetune:${SPARROW_FT_IMAGE_TAG:-${TORCH_VARIANT:-latest}}
+  environment: *service-env
+  volumes:
+    - ft-data:/data
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sparrow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: sparrow_finetune
+    volumes:
+      - ft-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sparrow -d sparrow_finetune"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      # Loopback by default; put a TLS reverse proxy in front for remote access.
+      - "${SPARROW_FT_BIND:-127.0.0.1}:${SPARROW_FT_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/v1/health', timeout=5).status == 200 else 1)"
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker-cpu:
+    <<: *app
+    command: ["worker", "--resources", "cpu"]
+    # PyTorch DataLoader workers pass batches through /dev/shm; Docker's 64 MB
+    # default hangs training and YOLO validation.
+    shm_size: ${SPARROW_FT_SHM_SIZE:-4gb}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker-gpu:
+    <<: *app
+    # Always the CUDA build, whatever TORCH_VARIANT selects for the other services: a CPU-only
+    # torch cannot use the GPU. Its tag stays `latest` (or SPARROW_FT_GPU_IMAGE_TAG); the other
+    # services default to the TORCH_VARIANT tag when one is set, so the two builds never share a name.
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+      args:
+        TORCH_VARIANT: cu128
+    image: sparrow-finetune:${SPARROW_FT_GPU_IMAGE_TAG:-latest}
+    profiles: ["gpu"]
+    command: ["worker", "--resources", "cpu,gpu"]
+    shm_size: ${SPARROW_FT_SHM_SIZE:-4gb}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  ft-data:
+  ft-pg:

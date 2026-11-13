@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}Annotate · {{ project.name }}{% endblock %}
+{% block content %}
+
+<div class="row" style="margin-bottom:20px">
+  <a class="btn" href="{{ url_for('project', slug=project.slug) }}">← Back</a>
+  <div>
+    <h1 style="margin:0">Annotate</h1>
+    <div class="small muted">{{ project.name }}</div>
+  </div>
+</div>
+
+{% if error %}<div class="notice bad" style="margin-bottom:16px">{{ error }}</div>{% endif %}
+
+{% if not models %}
+  <div class="notice warn" style="margin-bottom:16px">
+    <strong>No trained models yet.</strong>
+    Assisted tagging needs a model to make the first guess. You can still create a
+    batch and tag it by hand, but the point of this page is to have a model do the
+    tedious part first.
+  </div>
+{% endif %}
+
+<div class="grid cols-2">
+  <div class="card">
+    <h3>New batch</h3>
+    <p class="small muted" style="margin:6px 0 14px">
+      Point at a folder of untagged images. They are copied here, so the batch
+      keeps working even if the original folder moves, and your source folder is
+      never written to.
+    </p>
+
+    <form method="post" action="{{ url_for('create_batch', slug=project.slug) }}"
+          id="batch-form">
+      <div class="field">
+        <label for="name">Batch name</label>
+        <input type="text" id="name" name="name" placeholder="e.g. Mara, May 2026">
+      </div>
+      <div class="field">
+        <label>Folder of images</label>
+        <div id="chosen" class="picked empty">Nothing chosen yet — pick a folder below.</div>
+        <input type="hidden" id="source_path" name="source_path">
+      </div>
+      <button class="btn primary" type="submit" id="create" disabled>Create batch</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <h3>Choose a folder</h3>
+      <span class="spacer"></span>
+      <span id="crumbs" class="small muted"></span>
+    </div>
+    <div id="browser"><p class="muted small">Loading…</p></div>
+    <div class="row" style="margin-top:14px; border-top:1px solid var(--border); padding-top:14px">
+      <div class="small muted" id="here-summary"></div>
+      <span class="spacer"></span>
+      <button class="btn" type="button" id="use-here">Use this folder</button>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>Batches</h3>
+  {% if not batches %}
+    <p class="muted small" style="margin-top:10px">Nothing yet.</p>
+  {% else %}
+  <table style="margin-top:8px">
+    <thead><tr>
+      <th>Batch</th><th class="num">Images</th><th class="num">Reviewed</th>
+      <th>Progress</th><th class="num">Exports</th><th>Created</th>
+    </tr></thead>
+    <tbody>
+      {% for b in batches %}
+      {% set pct = (100 * b.n_reviewed / b.n_images) if b.n_images else 0 %}
+      <tr>
+        <td>
+          <a href="{{ url_for('annotate_batch', slug=project.slug, batch_id=b.id) }}">{{ b.name }}</a>
+          <div class="small muted mono">{{ b.source_path }}</div>
+        </td>
+        <td class="num">{{ b.n_images|thousands }}</td>
+        <td class="num">{{ b.n_reviewed|thousands }}</td>
+        <td style="min-width:140px">
+          <div class="bar {{ 'good' if pct >= 100 }}"><span style="width:{{ pct|round(1) }}%"></span></div>
+          <div class="small muted">{{ pct|round(0)|int }}%</div>
+        </td>
+        <td class="num">{{ b.n_publishes or '' }}</td>
+        <td class="small muted">{{ b.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{% if not export_configured %}
+<div class="notice warn" style="margin-top:16px">
+  <strong>Exporting is not configured.</strong>
+  You can create batches and review them, but there is nowhere the app is allowed
+  to write the finished annotations. Set <code>SPARROW_EXPORT_ROOTS</code> and mount
+  those folders read-write in <code>docker-compose.yml</code>.
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='picker.js') }}"></script>
+<script>
+  Picker.mount({
+    onPick: function (path) {
+      document.getElementById('source_path').value = path;
+      const box = document.getElementById('chosen');
+      box.textContent = path;
+      box.classList.remove('empty');
+      document.getElementById('create').disabled = false;
+      const name = document.getElementById('name');
+      if (!name.value) name.value = path.split('/').filter(Boolean).slice(-1)[0]
+        .replace(/[_-]+/g, ' ');
+    },
+    start: ''   // empty: the server starts at the first allowed root
+  });
+
+  // Copying thousands of files takes a moment and the page blocks on it, so the
+  // button must not look clickable while that happens.
+  document.getElementById('batch-form').addEventListener('submit', function () {
+    const b = document.getElementById('create');
+    b.disabled = true;
+    b.textContent = 'Copying images…';
+  });
+</script>
+{% endblock %}

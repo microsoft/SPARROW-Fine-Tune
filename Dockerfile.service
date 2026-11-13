@@ -1,0 +1,62 @@
+# Sparrow fine-tuning service (API + workers). The legacy workbench image is `Dockerfile`.
+#
+# Default (TORCH_VARIANT=cu128): dependencies come from uv.lock, so the image matches the
+# tested environment. On linux the lock resolves torch/torchvision from the CUDA 12.8 index;
+# those wheels bundle the CUDA runtime and also run on CPU-only hosts, so one image serves
+# the api, the CPU worker, and (with an NVIDIA device reservation) the GPU worker.
+#
+# TORCH_VARIANT=cpu builds a smaller CPU-only image from requirements-cpu.txt: the same
+# package versions as uv.lock, with torch/torchvision from the PyTorch CPU index (FT-12).
+# The lock also pins the build backend (setuptools, wheel) with hashes. Both variants install
+# the project with --no-build-isolation so no unhashed build backend is fetched.
+# Regenerate that file with scripts/lock-cpu.sh after changing uv.lock.
+#   docker build -f Dockerfile.service --build-arg TORCH_VARIANT=cpu -t sparrow-finetune:cpu .
+FROM python:3.12-slim
+
+ARG TORCH_VARIANT=cu128
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=0 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    YOLO_CONFIG_DIR=/data/.ultralytics \
+    OMP_NUM_THREADS=4
+
+# UV_COMPILE_BYTECODE=0: compiling the torch tree exhausts the build sandbox file-descriptor
+# limit (os error 24). Python compiles lazily at first import instead.
+# libgl1/libglib2.0-0: opencv (pulled in by ultralytics). tini: reaps dataloader workers.
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 tini \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Dependencies first (cached unless the lock changes), project source second.
+COPY pyproject.toml uv.lock README.md requirements-cpu.txt ./
+RUN case "$TORCH_VARIANT" in \
+      cu128) uv sync --frozen --no-dev --extra export --no-install-project ;; \
+      cpu) uv venv /opt/venv \
+           && uv pip install --python /opt/venv/bin/python --torch-backend cpu \
+                --require-hashes -r requirements-cpu.txt ;; \
+      *) echo "TORCH_VARIANT must be cu128 or cpu, got $TORCH_VARIANT" >&2; exit 1 ;; \
+    esac
+
+COPY src ./src
+# Both variants: no build isolation, so the backend is the hash-checked setuptools already in
+# the venv (uv.lock for cu128, requirements-cpu.txt for cpu) and nothing unhashed is fetched (FT-22).
+RUN uv pip install --python /opt/venv/bin/python --no-deps --no-build-isolation . \
+    && sparrow-finetune --help >/dev/null \
+    && python -c "import torch; v = torch.__version__; print('torch', v); \
+assert ('+cpu' in v) == ('$TORCH_VARIANT' == 'cpu'), v"
+
+RUN useradd --create-home --uid 1000 sparrow && mkdir -p /data && chown sparrow /data
+USER sparrow
+
+ENV SPARROW_FT_DATA_DIR=/data
+VOLUME ["/data"]
+EXPOSE 8000
+
+ENTRYPOINT ["/usr/bin/tini", "--", "sparrow-finetune"]
+CMD ["api", "--host", "0.0.0.0", "--port", "8000"]

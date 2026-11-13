@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}Data health · {{ project.name }}{% endblock %}
+{% block content %}
+
+<div class="row" style="margin-bottom:20px">
+  <a class="btn" href="{{ url_for('project', slug=project.slug) }}">← Back</a>
+  <div>
+    <h1 style="margin:0">Data health</h1>
+    <div class="small muted">{{ project.name }}</div>
+  </div>
+  <span class="spacer"></span>
+  <button class="btn {{ 'primary' if not snapshot else '' }}" id="scan-btn"
+          data-post="{{ url_for('start_scan', slug=project.slug) }}"
+          data-confirm="{% if snapshot %}Re-scan {{ snapshot.n_images|thousands }} images?{% else %}Scan the dataset?{% endif %}&#10;&#10;Every image and annotation is read, so this takes a few minutes on a large folder. It runs in the background — you can carry on using the app.">
+    {{ 'Scan dataset' if not snapshot else 'Re-scan' }}</button>
+</div>
+
+{% set review_step = (steps | selectattr('id', 'equalto', 'review') | list | first) %}
+<div id="scan-banner" class="notice" style="margin-bottom:16px;
+     {{ '' if review_step.state == 'running' else 'display:none' }}">
+  <strong>Scanning…</strong>
+  <div id="scan-progress" class="small" style="margin-top:6px">Starting</div>
+  <div class="bar" style="margin-top:8px"><span id="scan-bar" style="width:0%"></span></div>
+  <div class="small muted" style="margin-top:8px">
+    This reads every image and annotation. You can leave this page — it keeps going.
+  </div>
+</div>
+
+{% if not snapshot %}
+  <div class="card empty">
+    <h2>Not scanned yet</h2>
+    <p>Scanning reads every image and annotation to find out what is in the folder,
+       and what is wrong with it. On a large dataset this takes a few minutes and
+       runs in the background — you can leave the page.</p>
+  </div>
+{% else %}
+
+<div class="stats" style="margin-bottom:16px">
+  {{ stat('Images', snapshot.n_images|thousands) }}
+  {{ stat('Readable', snapshot.n_readable|thousands,
+          sub = (snapshot.n_images - snapshot.n_readable)|string + ' unreadable',
+          bad = snapshot.n_images != snapshot.n_readable) }}
+  {{ stat('Tagged', snapshot.n_labelled|thousands) }}
+  {{ stat('Blank frames', snapshot.n_background|thousands) }}
+  {{ stat('Boxes', snapshot.n_boxes|thousands) }}
+  {{ stat('Species', snapshot.n_classes) }}
+</div>
+
+<div class="grid cols-2">
+  <div>
+    <div class="card">
+      <h3>Blank frames</h3>
+      <p class="small muted">
+        Empty frames teach the model to recognise "nothing here", which cuts false
+        positives. But not all of them can be trusted equally.
+      </p>
+      <table style="margin-top:10px">
+        <tbody>
+          <tr>
+            <td>Reviewed and confirmed empty
+              <div class="small muted">Has an annotation file with no objects in it.</div></td>
+            <td class="num">{{ snapshot.blank_empty_xml|thousands }}</td>
+          </tr>
+          <tr>
+            <td>In a folder you declared blank
+              <div class="small muted">No annotation file, but you vouched for the folder.</div></td>
+            <td class="num">{{ snapshot.blank_confirmed_dir|thousands }}</td>
+          </tr>
+          <tr>
+            <td>No annotation at all
+              <div class="small muted">Either genuinely empty, or simply not tagged yet — the
+                files cannot tell us which. Excluded by default, because training an
+                untagged animal photo as background teaches the model that animals
+                are nothing.</div></td>
+            <td class="num">{{ snapshot.blank_unknown|thousands }}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      {% set used = snapshot.blank_empty_xml + snapshot.blank_confirmed_dir %}
+      {% set total = used + snapshot.n_labelled %}
+      {% if used and total %}
+        {% set frac = used / total %}
+        <div class="notice {{ 'warn' if frac > 0.30 else '' }}" style="margin-top:12px">
+          {{ used|thousands }} of {{ total|thousands }}
+          ({{ (frac * 100)|round(1) }}%) of the training set would be negatives.
+          {% if frac > 0.30 %}
+            That is well above the usual 0–10%. Too many negatives makes the model
+            conservative and costs recall on rare species.
+          {% else %}
+            That sits inside the usual 0–10% range.
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+
+    {% if issue_counts %}
+    <div class="card">
+      <h3>Problems found</h3>
+      {% set explain = {
+        'corrupt_image': 'Unreadable or truncated. Excluded from training.',
+        'missing_xml': 'No annotation. Only usable as a blank frame.',
+        'missing_image': 'Annotation with no matching image. Ignored.',
+        'size_mismatch': 'Annotation disagrees with the image size. The real size wins.',
+        'empty_xml': 'Reviewed and empty. Used as a negative.',
+        'confirmed_blank': 'Declared blank by you. Used as a negative.',
+        'invalid_box': 'Box outside the image, or zero-sized. Dropped.',
+        'duplicate_flat_name': 'Two images share a name across folders. Both are kept.',
+        'ambiguous_image_match': 'Annotation matched more than one image.',
+        'corrupt_xml': 'Malformed annotation file. Skipped.',
+        'empty_class_name': 'A box with a blank species name. Dropped.'
+      } %}
+      <table>
+        <thead><tr><th>Issue</th><th class="num">Count</th><th>What happens</th></tr></thead>
+        <tbody>
+          {% for kind, n in issue_counts.items() %}
+          <tr>
+            <td class="mono small">{{ kind }}</td>
+            <td class="num">{{ n|thousands }}</td>
+            <td class="small muted">{{ explain.get(kind, '') }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <div>
+    <div class="card">
+      <h3>Species ({{ classes|length }})</h3>
+      {% if classes %}
+        {% set top = classes[0].n_boxes %}
+        <div style="margin-top:10px">
+        {% for c in classes %}
+          <div class="classbar">
+            <span class="name" title="{{ c.class_name }}">{{ c.class_name }}</span>
+            <span class="bar"><span style="width: {{ (100 * c.n_boxes / top)|round(1) }}%"></span></span>
+            <span class="num">{{ c.n_boxes|thousands }}</span>
+          </div>
+        {% endfor %}
+        </div>
+        <p class="small muted" style="margin-top:12px">
+          Boxes per species. A species with very few examples cannot be learned
+          reliably, and its score will sit near zero however healthy the overall
+          number looks.
+        </p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const banner = document.getElementById('scan-banner');
+
+  // The button itself is handled by the shared [data-post] handler in base.html.
+  Sparrow.onStarted = function () { banner.style.display = ''; };
+
+  Sparrow.on('job.progress', function (d) {
+    if (d.kind !== 'audit' || !d.total) return;
+    banner.style.display = '';
+    document.getElementById('scan-progress').textContent =
+      (d.phase || 'Working') + ' — ' + d.current.toLocaleString() +
+      ' of ' + d.total.toLocaleString();
+    document.getElementById('scan-bar').style.width =
+      (100 * d.current / d.total).toFixed(1) + '%';
+  });
+
+  Sparrow.on('snapshot.created', function () { location.reload(); });
+  Sparrow.on('job.updated', function (d) {
+    if (d.state && d.state !== 'running') setTimeout(function () { location.reload(); }, 600);
+  });
+  Sparrow.connect(['jobs', 'project:{{ project.id }}']);
+</script>
+{% endblock %}

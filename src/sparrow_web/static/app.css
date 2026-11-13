@@ -1,0 +1,272 @@
+/* SPARROW Workbench.
+   Dark-first, quiet chrome, loud data. Hairlines and surface steps instead of
+   shadows. Colour is reserved for state and for data series — never decoration.
+
+   Hand-authored rather than Tailwind so the container needs no build step at
+   all: `docker compose up` is genuinely the only command. */
+
+:root {
+  --page:      #0d0d0d;
+  --surface:   #171716;
+  --surface-2: #1f1f1d;
+  --border:    rgba(255, 255, 255, 0.10);
+  --grid:      #2c2c2a;
+
+  --ink:       #ffffff;
+  --ink-2:     #c3c2b7;
+  --ink-muted: #898781;
+
+  --accent:    #3987e5;
+  --good:      #29a745;
+  --warn:      #d99a12;
+  --bad:       #e0574d;
+
+  /* Fixed data-series roles. Assigned by meaning, never by rank, so a colour
+     means the same thing on every chart in the app. */
+  --train: #3987e5;
+  --val:   #d95926;
+  --test:  #199e70;
+
+  --radius: 8px;
+  --gap: 16px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --page: #f9f9f7; --surface: #ffffff; --surface-2: #f2f2ef;
+    --border: rgba(11, 11, 11, 0.12); --grid: #e1e0d9;
+    --ink: #0b0b0b; --ink-2: #52514e; --ink-muted: #77756f;
+    --accent: #2a78d6;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink-2);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Figures must not jitter as they tick during training. */
+  font-variant-numeric: tabular-nums;
+}
+
+h1, h2, h3 { color: var(--ink); font-weight: 600; margin: 0 0 8px; }
+h1 { font-size: 22px; }
+h2 { font-size: 16px; }
+h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;
+     color: var(--ink-muted); font-weight: 600; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+/* ---------------------------------------------------------------- shell -- */
+.top {
+  display: flex; align-items: center; gap: 20px;
+  height: 52px; padding: 0 20px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10;
+}
+.top .brand { color: var(--ink); font-weight: 600; letter-spacing: 0.01em; }
+.top nav { display: flex; gap: 16px; margin-left: auto; }
+.wrap { max-width: 1400px; margin: 0 auto; padding: 24px 20px 64px; }
+
+/* ---------------------------------------------------------------- cards -- */
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px;
+}
+.card + .card { margin-top: var(--gap); }
+.grid { display: grid; gap: var(--gap); }
+.grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.row { display: flex; gap: var(--gap); align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+.muted { color: var(--ink-muted); }
+.small { font-size: 12px; }
+
+/* ------------------------------------------------------------- stat tiles -- */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+         gap: 1px; background: var(--border); border: 1px solid var(--border);
+         border-radius: var(--radius); overflow: hidden; }
+.stat { background: var(--surface); padding: 14px 16px; }
+.stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+               color: var(--ink-muted); }
+.stat .value { font-size: 26px; color: var(--ink); line-height: 1.2; margin-top: 4px; }
+.stat .sub { font-size: 12px; color: var(--ink-muted); }
+.stat.bad .value { color: var(--bad); }
+
+/* ---------------------------------------------------------------- steps -- */
+.steps { list-style: none; margin: 0; padding: 0; }
+.steps li {
+  display: flex; gap: 12px; padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.steps li:last-child { border-bottom: 0; }
+.steps .dot {
+  width: 22px; height: 22px; border-radius: 50%; flex: 0 0 22px;
+  display: grid; place-items: center; font-size: 11px; font-weight: 600;
+  border: 2px solid var(--grid); color: var(--ink-muted); margin-top: 1px;
+}
+.steps .body { flex: 1; min-width: 0; }
+.steps .name { color: var(--ink); font-weight: 500; }
+.steps .why { font-size: 12px; color: var(--ink-muted); margin-top: 2px; }
+
+/* State is carried by an icon and a label as well as colour. */
+.st-done    .dot { border-color: var(--good); background: var(--good); color: #fff; }
+.st-ready   .dot { border-color: var(--accent); color: var(--accent); }
+.st-running .dot { border-color: var(--accent); color: var(--accent);
+                   animation: pulse 1.6s ease-in-out infinite; }
+.st-stale   .dot { border-color: var(--warn); color: var(--warn); }
+.st-failed  .dot { border-color: var(--bad); background: var(--bad); color: #fff; }
+.st-locked  .dot { opacity: 0.45; }
+.st-locked  .name { color: var(--ink-muted); }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) {
+  .st-running .dot { animation: none; }
+}
+
+/* ---------------------------------------------------------------- badges -- */
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 500;
+  border: 1px solid var(--border); color: var(--ink-2); background: var(--surface-2);
+}
+.badge.good   { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.badge.warn   { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.badge.bad    { color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+.badge.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+/* --------------------------------------------------------------- buttons -- */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--ink); font-size: 13px; font-weight: 500; font-family: inherit;
+}
+.btn:hover { border-color: var(--ink-muted); text-decoration: none; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+.btn[disabled], .btn.disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* --------------------------------------------------------------- tables -- */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--ink-muted); font-weight: 500; font-size: 11px;
+     text-transform: uppercase; letter-spacing: 0.04em; }
+td.num, th.num { text-align: right; }
+tbody tr:hover { background: var(--surface-2); }
+
+/* ------------------------------------------------------------------ bars -- */
+.bar { height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--accent); }
+.bar.good > span { background: var(--good); }
+.bar.warn > span { background: var(--warn); }
+.bar.bad  > span { background: var(--bad); }
+
+.classbar { display: grid; grid-template-columns: 180px 1fr 70px; gap: 10px;
+            align-items: center; padding: 3px 0; font-size: 12px; }
+.classbar .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.classbar .num { text-align: right; color: var(--ink-muted); }
+
+/* ------------------------------------------------------------------ gpus -- */
+.gpu { display: grid; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.gpu:last-child { border-bottom: 0; }
+.gpu .head { display: flex; align-items: baseline; gap: 8px; }
+.gpu .head .n { color: var(--ink); font-weight: 500; }
+
+/* ----------------------------------------------------------------- misc --- */
+.empty { text-align: center; padding: 48px 20px; color: var(--ink-muted); }
+.empty h2 { color: var(--ink); }
+.log { background: #0a0a0a; border: 1px solid var(--border); border-radius: 6px;
+       padding: 12px; font-size: 12px; line-height: 1.45; max-height: 420px;
+       overflow: auto; white-space: pre-wrap; word-break: break-word; color: var(--ink-2); }
+.notice { border-left: 3px solid var(--accent); background: var(--surface-2);
+          padding: 12px 14px; border-radius: 0 6px 6px 0; font-size: 13px; }
+.notice.warn { border-left-color: var(--warn); }
+.notice.bad  { border-left-color: var(--bad); }
+.chart { width: 100%; height: 260px; }
+label { display: block; font-size: 12px; color: var(--ink-muted); margin-bottom: 4px; }
+input[type=text], select {
+  width: 100%; padding: 8px 10px; border-radius: 6px; font-family: inherit;
+  background: var(--page); border: 1px solid var(--border); color: var(--ink); font-size: 13px;
+}
+.field { margin-bottom: 14px; }
+.live { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+        color: var(--ink-muted); }
+.live::before { content: ""; width: 6px; height: 6px; border-radius: 50%;
+                background: var(--good); }
+.live.stale::before { background: var(--warn); }
+
+/* --------------------------------------------------------- folder picker -- */
+.picked {
+  padding: 9px 11px; border-radius: 6px; font-size: 13px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  word-break: break-all; color: var(--ink);
+}
+.picked.empty { color: var(--ink-muted); font-family: inherit; font-style: italic; }
+
+table.browser td { padding: 6px 8px; }
+table.browser tr.nav td { border-bottom: 1px solid var(--border); }
+table.browser a { color: var(--ink); }
+table.browser a:hover { color: var(--accent); }
+table.browser tr:hover { background: var(--surface-2); }
+#browser { max-height: 340px; overflow: auto; margin-top: 8px; }
+#crumbs a { color: var(--ink-muted); }
+#crumbs a:hover { color: var(--accent); }
+
+/* ------------------------------------------------------- training form -- */
+/* Label and control on one line so 30 settings stay scannable; the help text
+   sits under both, indented to the control column. */
+.setting { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.setting:last-child { border-bottom: 0; }
+.setting-main { display: grid; grid-template-columns: 1fr 150px auto; gap: 10px;
+                align-items: center; }
+.setting-main label { margin: 0; font-size: 13px; color: var(--ink); }
+.setting-main input[type=checkbox] { width: auto; justify-self: end; }
+.setting .small { margin-top: 4px; }
+.setting .unit { white-space: nowrap; }
+.setting.has-error input, .setting.has-error select { border-color: var(--bad); }
+
+/* Advanced settings are present in the DOM so they always submit — a hidden
+   input that stopped posting would silently revert to a default. */
+.setting.adv { display: none; }
+body.show-advanced .setting.adv { display: block; }
+
+@media (max-width: 560px) {
+  .setting-main { grid-template-columns: 1fr; }
+  .setting-main input[type=checkbox] { justify-self: start; }
+}
+
+/* ---------------------------------------------------- annotation editor -- */
+/* The canvas is drawn at the image's native resolution and scaled down by CSS,
+   so box coordinates are always in image pixels. Converting on every mouse
+   event instead would put rounding error into saved annotations. */
+#canvas-wrap { background: #000; border: 1px solid var(--border); border-radius: 6px;
+               overflow: hidden; display: grid; place-items: center;
+               min-height: 320px; max-height: 68vh; }
+#canvas { max-width: 100%; max-height: 68vh; display: block; cursor: crosshair; }
+
+#image-list { max-height: 340px; overflow: auto; }
+.ann-item { display: flex; gap: 8px; align-items: center; padding: 4px 6px;
+            border-radius: 4px; font-size: 12px; cursor: pointer; }
+.ann-item:hover { background: var(--surface-2); }
+.ann-item.sel { background: var(--surface-2); outline: 1px solid var(--accent); }
+.ann-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ann-item .mark { width: 12px; flex: 0 0 12px; text-align: center; color: var(--ink-muted); }
+/* Same colour meanings as the boxes on the canvas: green confirmed, amber a
+   guess nobody has checked. */
+.ann-item.st-reviewed .mark { color: var(--good); }
+.ann-item.st-predicted .mark { color: var(--warn); }
+.ann-item.st-pending   { color: var(--ink-muted); }
+
+#box-table tr.sel { background: var(--surface-2); }
+#box-table select { width: auto; min-width: 140px; padding: 3px 6px; font-size: 12px; }
+
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "▸ "; }
+details[open] > summary::before { content: "▾ "; }

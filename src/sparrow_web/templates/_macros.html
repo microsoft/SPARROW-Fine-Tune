@@ -1,0 +1,105 @@
+{# Shared fragments. Kept in one place so a step or a GPU card looks identical
+   wherever it appears. #}
+
+{% macro step_list(steps, project) %}
+<ul class="steps">
+  {% for step in steps %}
+  <li class="st-{{ step.state }}">
+    <span class="dot">
+      {%- if step.state == 'done' -%}✓
+      {%- elif step.state == 'failed' -%}!
+      {%- elif step.state == 'stale' -%}↻
+      {%- else -%}{{ loop.index }}{%- endif -%}
+    </span>
+    <span class="body">
+      <span class="row" style="gap:8px">
+        <span class="name">{{ step.label }}</span>
+        {% if step.state == 'running' %}<span class="badge accent">Running</span>
+        {% elif step.state == 'stale' %}<span class="badge warn">Out of date</span>
+        {% elif step.state == 'failed' %}<span class="badge bad">Failed</span>
+        {% elif step.state == 'locked' %}<span class="badge">Locked</span>
+        {% endif %}
+      </span>
+
+      {% if step.state == 'running' and step.summary.total %}
+        <div class="bar" style="margin-top:6px">
+          <span style="width: {{ (100 * step.summary.current / step.summary.total)|round(1) }}%"></span>
+        </div>
+        <span class="why">{{ step.summary.phase or 'Working' }} —
+          {{ step.summary.current|thousands }} of {{ step.summary.total|thousands }}</span>
+      {% elif step.reason %}
+        {# A locked step always says why. A dead control with no explanation is
+           the most frustrating thing in a stepped interface. #}
+        <span class="why">{{ step.reason }}</span>
+      {% elif step.id == 'review' and step.state == 'done' %}
+        <span class="why">{{ step.summary.n_images|thousands }} images ·
+          {{ step.summary.n_boxes|thousands }} boxes ·
+          {{ step.summary.n_classes }} classes</span>
+      {% elif step.id == 'prepare' and step.summary.n_train %}
+        <span class="why">{{ step.summary.n_train|thousands }} train ·
+          {{ step.summary.n_val|thousands }} val · {{ step.summary.n_test|thousands }} test</span>
+      {% elif step.id == 'train' and step.summary.best_fitness %}
+        <span class="why">Best {{ step.summary.best_fitness|metric }} at epoch
+          {{ step.summary.best_epoch }}{% if step.summary.stopped_early %} (stopped early){% endif %}</span>
+      {% elif step.id == 'evaluate' and step.summary.map5095 %}
+        <span class="why">mAP@50-95 {{ step.summary.map5095|metric }} ·
+          mAP@50 {{ step.summary.map50|metric }}</span>
+      {% endif %}
+    </span>
+
+    {% if step.action and step.state != 'locked' %}
+      {% if step.action.post %}
+        {# Starts the job here rather than navigating: the user asked to stay on
+           the page they were on, with the progress appearing in place. #}
+        <button class="btn {{ 'primary' if step.state in ('ready', 'stale') else '' }}"
+                data-post="{{ step.action.post }}"
+                data-confirm="{{ step.action.confirm or '' }}">{{ step.action.label }}</button>
+      {% else %}
+        <a class="btn {{ 'primary' if step.state in ('ready', 'stale') else '' }}"
+           href="{{ step.action.href }}">{{ step.action.label }}</a>
+      {% endif %}
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endmacro %}
+
+
+{% macro gpu_cards(gpus, id='gpus') %}
+<div id="{{ id }}">
+  {% if not gpus %}
+    <p class="muted small">No GPUs detected.</p>
+  {% endif %}
+  {% for g in gpus %}
+  <div class="gpu" data-gpu="{{ g.index }}">
+    <div class="head">
+      <span class="n">GPU {{ g.index }}</span>
+      <span class="muted small">{{ g.name }}</span>
+      {% if g.display_attached %}
+        {# Worth surfacing: this card has less free memory, which is why the
+           suggested batch size is smaller. #}
+        <span class="badge">display</span>
+      {% endif %}
+      <span class="spacer"></span>
+      <span class="small mono" data-field="util">{{ g.utilization_pct if g.utilization_pct is not none else '-' }}%</span>
+    </div>
+    <div class="bar"><span data-field="utilbar"
+      style="width: {{ g.utilization_pct or 0 }}%"></span></div>
+    <div class="row small muted" style="gap:14px">
+      <span data-field="mem">{{ (g.used_mb / 1024)|round(1) }} / {{ (g.total_mb / 1024)|round(0)|int }} GiB</span>
+      <span data-field="temp">{{ g.temperature_c if g.temperature_c is not none else '-' }}°C</span>
+      <span data-field="power">{{ g.power_w|round(0)|int if g.power_w is not none else '-' }} W</span>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+
+{% macro stat(label, value, sub='', bad=false) %}
+<div class="stat {{ 'bad' if bad else '' }}">
+  <div class="label">{{ label }}</div>
+  <div class="value">{{ value }}</div>
+  {% if sub %}<div class="sub">{{ sub }}</div>{% endif %}
+</div>
+{% endmacro %}

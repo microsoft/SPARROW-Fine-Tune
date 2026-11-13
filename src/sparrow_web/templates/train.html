@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}Train · {{ project.name }}{% endblock %}
+
+{% macro setting(s, values, errors) %}
+<div class="setting {{ 'adv' if s.advanced }} {{ 'has-error' if errors.get(s.name) }}">
+  <div class="setting-main">
+    <label for="f-{{ s.name }}">{{ s.label }}</label>
+    {% if s.kind == 'bool' %}
+      <input type="checkbox" id="f-{{ s.name }}" name="{{ s.name }}"
+             {{ 'checked' if values.get(s.name) }}>
+    {% elif s.kind == 'choice' %}
+      <select id="f-{{ s.name }}" name="{{ s.name }}">
+        {% for value, text in s.choices %}
+          <option value="{{ value }}"
+                  {{ 'selected' if values.get(s.name)|string == value }}>{{ text }}</option>
+        {% endfor %}
+      </select>
+    {% else %}
+      <input type="text" id="f-{{ s.name }}" name="{{ s.name }}"
+             inputmode="decimal" value="{{ values.get(s.name) }}">
+    {% endif %}
+    {% if s.unit %}<span class="unit small muted">{{ s.unit }}</span>{% endif %}
+  </div>
+  {% if errors.get(s.name) %}
+    <div class="small" style="color:var(--bad)">{{ errors[s.name] }}</div>
+  {% elif s.help %}
+    <div class="small muted">{{ s.help }}</div>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% block content %}
+
+<div class="row" style="margin-bottom:20px">
+  <a class="btn" href="{{ url_for('project', slug=project.slug) }}">← Back</a>
+  <div>
+    <h1 style="margin:0">Train a model</h1>
+    <div class="small muted">{{ project.name }}</div>
+  </div>
+</div>
+
+{% if not prepared %}
+  <div class="card empty">
+    <h2>Build a training set first</h2>
+    <p>There is nothing to train on until the images have been split into
+       training, validation and test sets.</p>
+    <a class="btn primary" href="{{ url_for('dataset_page', slug=project.slug) }}">
+      Go to training set</a>
+  </div>
+{% else %}
+
+{% if errors %}
+  <div class="notice bad" style="margin-bottom:16px">
+    <strong>Nothing was started.</strong>
+    {{ errors|length }} setting{{ 's' if errors|length != 1 }} need
+    {{ 's' if errors|length == 1 }} fixing — each is marked below.
+  </div>
+{% endif %}
+
+<form method="post" action="{{ url_for('start_training', slug=project.slug) }}" id="train-form">
+<div class="grid cols-2">
+
+  <div>
+    <div class="card">
+      <h3>Starting point</h3>
+      <p class="small muted" style="margin:6px 0 12px">
+        Every option here is transfer learning — the model begins from weights that
+        already know what an animal looks like, rather than from nothing.
+      </p>
+
+      <div class="field">
+        <label>
+          <input type="radio" name="start_from" value="coco" style="width:auto"
+                 {{ 'checked' if not values.get('start_from', '').startswith('model:') }}>
+          A general-purpose model
+        </label>
+        <select name="model" id="f-model" style="margin-top:8px">
+          {% for value, text in base_models %}
+            <option value="{{ value }}"
+                    {{ 'selected' if values.model == value }}>{{ text }}</option>
+          {% endfor %}
+        </select>
+        <p class="small muted" style="margin-top:6px">
+          Trained on everyday photographs. The detection head is rebuilt for your
+          species, so they do not need to have existed in the original.
+        </p>
+      </div>
+
+      {% if models %}
+      <div class="field">
+        <label>Or continue from one of your own</label>
+        {% for m in models %}
+          <label class="small" style="display:block; margin-top:6px">
+            <input type="radio" name="start_from" value="model:{{ m.id }}" style="width:auto">
+            <strong>v{{ m.version }}</strong>
+            <span class="muted">· {{ m.created_at }}</span>
+          </label>
+        {% endfor %}
+        <p class="small muted" style="margin-top:8px">
+          Picks up where that model left off, so new images cost far less time than
+          starting again. Lower the learning rate when you do this — the weights are
+          already close to right, and a large step throws that away.
+        </p>
+      </div>
+      {% endif %}
+    </div>
+
+    {% for name, items in groups %}
+    <div class="card">
+      <h3>{{ name }}</h3>
+      {% if name == 'Image' %}
+        {{ setting(items[0], values, errors) }}
+
+        <div class="setting">
+          <div class="setting-main">
+            <label for="f-batch">Batch size</label>
+            <input type="text" id="f-batch" name="batch" value="{{ values.batch }}">
+          </div>
+          <div class="small muted" id="batch-note">
+            Images per step. <code>auto</code> lets the machine work it out.
+          </div>
+          {% if errors.get('batch') %}
+            <div class="small" style="color:var(--bad)">{{ errors.batch }}</div>
+          {% endif %}
+        </div>
+
+        {% for s in items[1:] %}{{ setting(s, values, errors) }}{% endfor %}
+      {% elif name == 'Hardware' %}
+        <div class="setting">
+          <div class="setting-main">
+            <label for="f-device">GPU</label>
+            <select id="f-device" name="device">
+              {% for g in gpus %}
+                <option value="{{ g.index }}"
+                        {{ 'selected' if values.device|string == g.index|string }}>
+                  GPU {{ g.index }} — {{ g.name }}
+                  {%- if g.display_attached %} (drives the display){% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="small muted">
+            GPU {{ train_gpu }} is the default because nothing else is using it.
+            Training on the card that drives the display leaves less memory and
+            makes the desktop stutter. Multi-GPU is not offered: it does not work
+            under WSL2.
+          </div>
+          {% if errors.get('device') %}
+            <div class="small" style="color:var(--bad)">{{ errors.device }}</div>
+          {% endif %}
+        </div>
+        {% for s in items %}{{ setting(s, values, errors) }}{% endfor %}
+      {% else %}
+        {% for s in items %}{{ setting(s, values, errors) }}{% endfor %}
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <div>
+    <div class="card" id="summary-card">
+      <h3>Ready to start</h3>
+      <div class="stats" style="margin-top:10px">
+        {{ stat('Train', prepared.n_train|thousands) }}
+        {{ stat('Validation', prepared.n_val|thousands) }}
+        {{ stat('Species', prepared.n_classes) }}
+      </div>
+      <p class="small muted" style="margin-top:12px">
+        Training set built {{ prepared.created_at }}. The test split is held back and
+        not used until you evaluate.
+      </p>
+
+      <button class="btn primary" type="submit" id="train-submit"
+              style="width:100%; justify-content:center; margin-top:6px">
+        Start training</button>
+      <p class="small muted" style="margin-top:10px">
+        Runs in the background and survives closing this page, restarting the app,
+        or losing the network. You can stop it at any time and keep the best
+        checkpoint so far.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="row"><h3>Hardware</h3><span class="spacer"></span>
+        <span class="live">Live</span></div>
+      <div id="gpus"><p class="muted small">Loading…</p></div>
+    </div>
+
+    {% if previous_run %}
+    <div class="card">
+      <h3>Last run</h3>
+      <p class="small muted" style="margin-top:6px">
+        Settings below are carried over from
+        <a href="{{ url_for('run_detail', slug=project.slug, run_id=previous_run.id) }}">{{ previous_run.name }}</a>,
+        so a second attempt starts from what you last chose.
+      </p>
+      <button class="btn" type="button" id="reset-defaults"
+              style="margin-top:8px">Reset to defaults</button>
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <h3>Advanced settings</h3>
+      <label class="small">
+        <input type="checkbox" id="show-advanced" style="width:auto; margin-right:6px">
+        Show all {{ groups|map(attribute=1)|map('length')|sum }} settings
+      </label>
+      <p class="small muted" style="margin-top:8px">
+        The hidden ones are augmentation and optimiser internals. The defaults are
+        Ultralytics' own and are a sound starting point — change them when you have
+        a specific reason, not to see what happens.
+      </p>
+    </div>
+  </div>
+</div>
+</form>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const form = document.getElementById('train-form');
+  if (form) {
+    document.getElementById('show-advanced').addEventListener('change', function (ev) {
+      document.body.classList.toggle('show-advanced', ev.target.checked);
+    });
+
+    document.getElementById('train-submit').addEventListener('click', function () {
+      // Queueing twice would put two runs on one GPU; the second would sit
+      // waiting for a lease it cannot get until the first finishes days later.
+      setTimeout(function () {
+        const b = document.getElementById('train-submit');
+        b.disabled = true;
+        b.textContent = 'Starting…';
+      }, 0);
+    });
+
+    const reset = document.getElementById('reset-defaults');
+    if (reset) reset.addEventListener('click', function () {
+      if (confirm('Reset every setting to its default?')) location.search = '?defaults=1';
+    });
+
+    // "Auto" alone tells you nothing, and the answer moves with the model, the
+    // image size and how much memory the display is using right now.
+    function refreshBatch() {
+      const note = document.getElementById('batch-note');
+      const q = new URLSearchParams({
+        batch: document.getElementById('f-batch').value,
+        model: document.getElementById('f-model').value,
+        imgsz: document.getElementById('f-imgsz').value,
+        device: document.getElementById('f-device').value
+      });
+      fetch('/api/projects/{{ project.id }}/batch?' + q)
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (d.label) note.textContent = 'Resolves to ' + d.label + '.'; })
+        .catch(function () {});
+    }
+    ['f-batch', 'f-model', 'f-imgsz', 'f-device'].forEach(function (id) {
+      document.getElementById(id).addEventListener('change', refreshBatch);
+    });
+    refreshBatch();
+  }
+
+  const host = document.querySelector('#gpus');
+  Sparrow.on('gpu.sample', function (data) {
+    if (!host) return;
+    host.innerHTML = (data.gpus || []).map(function (g) {
+      return '<div class="gpu"><div class="head"><span class="n">GPU ' + g.index + '</span>'
+        + '<span class="muted small">' + g.name + '</span>'
+        + (g.display_attached ? '<span class="badge">display</span>' : '')
+        + '<span class="spacer"></span><span class="small mono">'
+        + (g.utilization_pct == null ? '-' : g.utilization_pct) + '%</span></div>'
+        + '<div class="bar"><span style="width:' + (g.utilization_pct || 0) + '%"></span></div>'
+        + '<div class="row small muted" style="gap:14px"><span>'
+        + (g.used_mb / 1024).toFixed(1) + ' / ' + Math.round(g.total_mb / 1024) + ' GiB free '
+        + ((g.total_mb - g.used_mb) / 1024).toFixed(1) + '</span></div></div>';
+    }).join('') || '<p class="muted small">No GPUs detected.</p>';
+  });
+  Sparrow.connect(['gpu']);
+</script>
+{% endblock %}

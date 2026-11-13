@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "_macros.html" import gpu_cards %}
+{% block title %}System · SPARROW{% endblock %}
+{% block content %}
+<h1>System</h1>
+
+<div class="grid cols-2">
+  <div class="card">
+    <div class="row"><h3>GPUs</h3><span class="spacer"></span><span class="live">Live</span></div>
+    {{ gpu_cards(gpus) }}
+  </div>
+
+  <div class="card">
+    <h3>Environment</h3>
+    <table>
+      <tbody>
+        <tr><td>Platform</td><td>{{ 'WSL2' if is_wsl else 'Linux / other' }}</td></tr>
+        <tr>
+          <td>/dev/shm</td>
+          <td>{{ shm_gb }} GiB
+            {% if shm_gb < 8 %}
+              <span class="badge bad">too small</span>
+              <div class="small muted">Dataloader workers die partway through the first
+                epoch. Run the container with <code>--ipc=host --shm-size=32g</code>.</div>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td>Prepared folder links</td>
+          <td>
+            {% if links.symlink or links.hardlink %}
+              <span class="badge good">supported</span>
+            {% else %}
+              <span class="badge bad">not supported</span>
+              <div class="small muted">Images will be copied rather than linked,
+                duplicating the full dataset size on disk. Usually means the prepared
+                folder is on a Windows drive.</div>
+            {% endif %}
+          </td>
+        </tr>
+        <tr><td>Training GPU</td><td>{{ settings.train_gpu }}
+          <span class="small muted">— chosen for having no display attached</span></td></tr>
+        <tr><td>Evaluation GPU</td><td>{{ settings.infer_gpu }}
+          <span class="small muted">— kept free so evaluation never waits on training</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>Sparrow.connect(['gpu']);</script>
+{% endblock %}

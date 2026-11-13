@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}{{ batch.name }} · Annotate{% endblock %}
+{% block content %}
+
+<div class="row" style="margin-bottom:16px">
+  <a class="btn" href="{{ url_for('annotate', slug=project.slug) }}">← Back</a>
+  <div>
+    <h1 style="margin:0">{{ batch.name }}</h1>
+    <div class="small muted mono">{{ batch.source_path }}</div>
+  </div>
+  <span class="spacer"></span>
+  {% if export_configured %}
+    <a class="btn" href="{{ url_for('publish_page', slug=project.slug, batch_id=batch.id) }}">
+      Export…</a>
+  {% endif %}
+</div>
+
+<div class="stats" style="margin-bottom:16px">
+  {{ stat('Images', progress.total|thousands) }}
+  {{ stat('Reviewed', progress.reviewed|thousands,
+          sub = ((100 * progress.reviewed / progress.total)|round(0)|int|string + '%')
+                if progress.total else '') }}
+  {{ stat('AI-suggested', progress.predicted|thousands, sub='not yet checked') }}
+  {{ stat('Not run', progress.pending|thousands) }}
+  {{ stat('No animals', progress.blank|thousands) }}
+  {{ stat('Boxes', progress.boxes|thousands) }}
+</div>
+
+{% if running %}
+<div class="notice" id="run-banner" style="margin-bottom:16px">
+  <strong>Finding animals…</strong>
+  <div id="run-progress" class="small" style="margin-top:6px">Starting</div>
+  <div class="bar" style="margin-top:8px"><span id="run-bar" style="width:0%"></span></div>
+  <div class="small muted" style="margin-top:8px">
+    Running on GPU {{ infer_gpu }}, so a training run on the other
+    card keeps going. You can review finished images while this works.
+  </div>
+</div>
+{% endif %}
+
+<div class="grid cols-2" style="grid-template-columns: 320px 1fr; align-items:start">
+  <div>
+    <div class="card">
+      <h3>Run a model</h3>
+      {% if not models %}
+        <p class="small muted" style="margin-top:8px">
+          No trained models available yet.
+        </p>
+      {% else %}
+      <form method="post" id="run-form"
+            action="{{ url_for('run_prediction', slug=project.slug, batch_id=batch.id) }}">
+        <div class="field">
+          <label for="model_version_id">Model</label>
+          <select id="model_version_id" name="model_version_id">
+            {% for m in models %}
+              <option value="{{ m.id }}">
+                {{ m.project_name }} v{{ m.version }} — {{ m.n_classes }} species
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="row" style="gap:10px">
+          <div style="flex:1"><label for="conf">Confidence</label>
+            <input type="text" id="conf" name="conf" value="0.35"></div>
+          <div style="flex:1"><label for="iou">Overlap (IoU)</label>
+            <input type="text" id="iou" name="iou" value="0.45"></div>
+        </div>
+        <p class="small muted" style="margin:6px 0 12px">
+          Lower confidence finds more animals and more false alarms. For rare
+          species that is usually the right trade — a box you delete costs a
+          second; an animal the model never proposed costs you the image.
+        </p>
+
+        <div class="field">
+          <label for="force_class">Species</label>
+          <input type="text" id="force_class" name="force_class" list="species"
+                 placeholder="Leave empty to use the model's own predictions"
+                 autocomplete="off">
+          <p class="small muted" style="margin-top:6px">
+            Forcing one species is right when you know the whole folder is one
+            animal and only want the boxes drawn. <strong>Type any name</strong> —
+            it does not have to be one the model knows, which is how you tag a
+            species it has never seen. The model only finds the animals; you say
+            what they are.
+          </p>
+        </div>
+
+        <div class="field">
+          <label class="small">
+            <input type="checkbox" name="only_missing" style="width:auto; margin-right:6px" checked>
+            Skip images that already have annotations
+          </label>
+          <p class="small muted" style="margin-top:6px">
+            Untick to re-run everything. Images you have already reviewed keep
+            your corrections either way.
+          </p>
+        </div>
+
+        <details style="margin-bottom:12px">
+          <summary class="small muted" style="cursor:pointer">Advanced</summary>
+          <div class="row" style="gap:10px; margin-top:10px">
+            <div style="flex:1"><label for="imgsz">Image size</label>
+              <input type="text" id="imgsz" name="imgsz" value="1024"></div>
+            <div style="flex:1"><label for="max_det">Max per image</label>
+              <input type="text" id="max_det" name="max_det" value="300"></div>
+          </div>
+        </details>
+
+        <button class="btn primary" type="submit" id="run-btn"
+                style="width:100%; justify-content:center"
+                {{ 'disabled' if running }}>
+          {{ 'Already running' if running else 'Find animals' }}</button>
+      </form>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <h3>Images</h3><span class="spacer"></span>
+        <span class="small muted" id="review-count">{{ progress.reviewed }} / {{ progress.total }}</span>
+      </div>
+      <div class="row" style="gap:4px; margin:8px 0">
+        {% for key, text in filters.items() %}
+          <a class="btn {{ 'primary' if key == chosen_filter }}" style="padding:4px 8px; font-size:11px"
+             href="{{ url_for('annotate_batch', slug=project.slug, batch_id=batch.id, filter=key) }}"
+             title="{{ text }}">{{ text }}</a>
+        {% endfor %}
+      </div>
+      <div id="image-list"></div>
+    </div>
+
+    {% if passes %}
+    <div class="card">
+      <h3>History</h3>
+      <p class="small muted" style="margin:4px 0 8px">
+        Every pass is kept, so you can see what produced what.
+      </p>
+      <table>
+        <tbody>
+          {% for p in passes %}
+          <tr>
+            <td>v{{ p.model_version }}
+              <div class="small muted">conf {{ p.conf }} · {{ p.n_boxes|thousands }} boxes
+                {%- if p.force_class %} · forced {{ p.force_class }}{% endif %}</div></td>
+            <td class="num small muted">{{ p.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card" id="editor">
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn" id="prev">←</button>
+      <strong id="current-name" class="small mono">Select an image</strong>
+      <button class="btn" id="next">→</button>
+      <span class="spacer"></span>
+      <label class="small muted" style="margin:0" for="box-label">Label</label>
+      <input type="text" id="box-label" list="species" autocomplete="off"
+             placeholder="Species for new boxes" style="width:auto; min-width:200px">
+      <button class="btn" id="add-box">Add box</button>
+      <button class="btn danger" id="del-box">Delete box</button>
+      <button class="btn danger" id="del-image" title="Remove this image from the batch">
+        Delete image</button>
+      <button class="btn primary" id="save">Save &amp; next</button>
+    </div>
+
+    {# One shared list of suggestions for every species field on the page. The
+       inputs are comboboxes, not dropdowns: a new animal has to be typeable. #}
+    <datalist id="species">
+      {% for c in class_names %}<option value="{{ c }}"></option>{% endfor %}
+    </datalist>
+
+    <div id="canvas-wrap"><canvas id="canvas"></canvas></div>
+
+    <div class="row small muted" style="margin-top:10px">
+      <span><b>Space</b> save and next</span>
+      <span><b>←/→</b> move</span>
+      <span><b>Delete</b> remove box</span>
+      <span><b>Ctrl+S</b> save</span>
+      <span><b>Shift+Delete</b> remove image</span>
+      <span class="spacer"></span>
+      <span id="editor-status"></span>
+    </div>
+
+    <table style="margin-top:10px">
+      <thead><tr><th>#</th><th>Species</th><th class="num">Confidence</th>
+        <th>From</th><th class="num">Size</th><th></th></tr></thead>
+      <tbody id="box-table"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.ANNOTATE = {
+    batchId: {{ batch.id }},
+    images: {{ images | map(attribute='rel_path') | list | tojson }},
+    states: {{ images | map(attribute='state') | list | tojson }},
+    classes: {{ class_names | tojson }},
+    total: {{ progress.total }}
+  };
+</script>
+<script src="{{ url_for('static', filename='annotate.js') }}"></script>
+<script>
+  Sparrow.on('job.progress', function (d) {
+    if (d.kind !== 'predict' || !d.total) return;
+    const banner = document.getElementById('run-banner');
+    if (banner) banner.style.display = '';
+    const label = document.getElementById('run-progress');
+    if (label) label.textContent = (d.phase || 'Working') + ' — ' +
+      d.current.toLocaleString() + ' of ' + d.total.toLocaleString();
+    const bar = document.getElementById('run-bar');
+    if (bar) bar.style.width = (100 * d.current / d.total).toFixed(1) + '%';
+  });
+  Sparrow.on('annotation.pass', function () { location.reload(); });
+  Sparrow.connect(['jobs', 'project:{{ project.id }}']);
+
+  const runForm = document.getElementById('run-form');
+  if (runForm) runForm.addEventListener('submit', function () {
+    const b = document.getElementById('run-btn');
+    b.disabled = true;
+    b.textContent = 'Starting…';
+  });
+</script>
+{% endblock %}

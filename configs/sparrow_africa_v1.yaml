@@ -1,0 +1,113 @@
+# SPARROW Africa v1 - the base model.
+#
+# Starts from COCO-pretrained yolo11l and produces the checkpoint that later
+# versions fine-tune from. An existing ONNX export cannot be used as a starting
+# point: ONNX is an inference graph, not a trainable checkpoint, so v1 has to
+# come from the COCO weights.
+#
+#   sparrow-yolo doctor  -c configs/sparrow_africa_v1.yaml
+#   sparrow-yolo audit   -c configs/sparrow_africa_v1.yaml
+#   sparrow-yolo prepare -c configs/sparrow_africa_v1.yaml --overwrite
+#   sparrow-yolo train   -c configs/sparrow_africa_v1.yaml --set training.epochs=2 --watch
+#   sparrow-yolo train   -c configs/sparrow_africa_v1.yaml
+
+dataset:
+  # Container path. The host path (D:\Tagged\Sub_Saharan\images\v8, i.e.
+  # /mnt/d/... from WSL) is set as DATASET_HOST_PATH in .env and mounted here
+  # read-only.
+  root: /workspace/datasets/Sub_Saharan
+  name: sparrow_africa_v1
+
+  normalise_class_names: true
+
+  # Worth doing once on a first run: decodes every image rather than just the
+  # header, so truncated files surface now instead of killing epoch 1. Slower,
+  # and slower still over a Windows drive - drop to false on later runs.
+  deep_image_check: false
+
+  background_policy: reviewed
+  # If you have a folder of known-empty frames with no XML, name it here:
+  # confirmed_blank_dirs: [blanks]
+  confirmed_blank_dirs: []
+
+  drop_classes: []
+  # Raise after reading the audit: a class with a handful of boxes cannot be
+  # learned and just adds noise to the split.
+  min_boxes_per_class: 0
+
+paths:
+  prepared_root: /workspace/prepared
+  runs_root: /workspace/runs
+
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+  seed: 42
+  stratify: rarest
+  # Set to parent_dir if v8 contains burst sequences (several near-identical
+  # frames per trigger). Check the folder layout before deciding - grouping the
+  # wrong thing is as bad as not grouping.
+  group_by: none
+
+prepare:
+  # symlink, not copy: the dataset stays on D: and prepared/ holds only links,
+  # so no storage is duplicated. Training reads still go to the Windows drive,
+  # which is the slow part - see the note on workers below.
+  # Switch to `copy` if you have room on the Linux filesystem; that makes every
+  # epoch read from fast local disk.
+  link_mode: symlink
+  overwrite: false
+  reuse_class_map: true
+  reuse_split: true
+  workers: null
+
+training:
+  # yolo11l is the sweet spot on 32 GiB at 1024px. yolo11x fits but roughly
+  # halves throughput for a small accuracy gain - not worth it for a first
+  # baseline you intend to iterate on.
+  model: yolo11l.pt
+
+  imgsz: 1024
+  epochs: 100
+
+  # Sized from the free VRAM of the tightest GPU. GPU 0 drives your display, so
+  # it has ~1.2 GiB less than GPU 1 and sets the limit. Expect ~16 total (8/GPU).
+  batch: auto
+
+  # Both cards, via DDP. `doctor` runs a real NCCL all-reduce first - if that
+  # fails on WSL2, change this to "1" (GPU 1 has no display attached) rather
+  # than fighting it.
+  device: "1"
+
+  # Per GPU, so the total is workers x 2. The auto heuristic sizes for CPU, but
+  # reading from /mnt/d is latency-bound rather than CPU-bound: extra workers sit
+  # blocked on I/O and hide it. 8 is a reasonable starting point for a Windows
+  # drive. If epoch 1 dies, /dev/shm is too small - check `doctor`.
+  workers: 8
+
+  patience: 50   # see note below on close_mosaic
+  amp: true
+  seed: 0
+  deterministic: false
+
+  # RAM caching would remove the D: bottleneck entirely, but at 1024px each
+  # decoded image is ~3 MB, so it is only realistic for small datasets.
+  cache: false
+
+  resume: false
+
+  extra:
+    cos_lr: true
+
+    # Mosaic is disabled for the last 10 epochs, which usually gives a clear step
+    # up in accuracy. Early stopping does not know that, so patience is set to 50
+    # rather than 30 to give the run a fair chance of reaching epoch 90.
+    close_mosaic: 10
+
+export:
+  onnx: true
+  opset: null
+  dynamic: false
+  half: false
+  simplify: true

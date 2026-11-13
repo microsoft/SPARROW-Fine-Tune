@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stat %}
+{% block title %}Export {{ batch.name }}{% endblock %}
+{% block content %}
+
+<div class="row" style="margin-bottom:20px">
+  <a class="btn" href="{{ url_for('annotate_batch', slug=project.slug, batch_id=batch.id) }}">← Back</a>
+  <div>
+    <h1 style="margin:0">Export {{ batch.name }}</h1>
+    <div class="small muted">Write the images and annotations somewhere you choose</div>
+  </div>
+</div>
+
+{% if error %}<div class="notice bad" style="margin-bottom:16px">{{ error }}</div>{% endif %}
+
+{% if not export_roots %}
+  <div class="card empty">
+    <h2>No writable folders configured</h2>
+    <p>The app can only write where it has been given a read-write mount. Set
+       <code>SPARROW_EXPORT_ROOTS</code> and add the matching volumes to
+       <code>docker-compose.yml</code>.</p>
+  </div>
+{% else %}
+
+<div class="grid cols-2">
+  <div>
+    <div class="card">
+      <h3>What gets written</h3>
+      <div class="stats" style="margin-top:10px">
+        {{ stat('Reviewed', progress.reviewed|thousands) }}
+        {{ stat('AI only', progress.predicted|thousands) }}
+        {{ stat('Boxes', progress.boxes|thousands) }}
+      </div>
+
+      <form method="post" id="publish-form" style="margin-top:16px"
+            action="{{ url_for('publish_batch', slug=project.slug, batch_id=batch.id) }}">
+        <div class="field">
+          <label>Destination</label>
+          <div id="chosen" class="picked empty">Nothing chosen yet — pick a folder on the right.</div>
+          <input type="hidden" id="dest_path" name="dest_path">
+          <div id="dataset-warning" class="notice warn small" style="display:none; margin-top:10px">
+            This folder is inside a dataset a project scans. That is a useful
+            choice — the next scan will pick these images up and offer a retrain —
+            but it is the one case where the workbench writes into your source
+            data, so it should be deliberate.
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="small">
+            <input type="checkbox" name="reviewed_only" style="width:auto; margin-right:6px" checked>
+            Reviewed images only
+          </label>
+          <p class="small muted" style="margin-top:4px">
+            Untick to include AI suggestions nobody has checked. Those are guesses;
+            training on them teaches the model to agree with itself.
+          </p>
+        </div>
+
+        <div class="field">
+          <label class="small">
+            <input type="checkbox" name="include_images" style="width:auto; margin-right:6px" checked>
+            Include the image files
+          </label>
+          <p class="small muted" style="margin-top:4px">
+            Untick if the images are already where you are writing and you only
+            need the annotations.
+          </p>
+        </div>
+
+        <button class="btn primary" type="submit" id="go" disabled>Export</button>
+      </form>
+    </div>
+
+    {% if publishes %}
+    <div class="card">
+      <h3>Previous exports</h3>
+      <table style="margin-top:6px">
+        <tbody>
+          {% for p in publishes %}
+          <tr>
+            <td class="small mono">{{ p.dest_path }}
+              <div class="small muted">{{ p.n_images|thousands }} images ·
+                {{ p.n_xml|thousands }} annotations
+                {%- if p.reviewed_only %} · reviewed only{% endif %}</div></td>
+            <td class="num small muted">{{ p.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="small muted" style="margin-top:10px">
+        Kept as a record. Exporting again writes a new copy and adds a row rather
+        than replacing this one.
+      </p>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <h3>Choose a destination</h3>
+      <span class="spacer"></span>
+      <span id="crumbs" class="small muted"></span>
+    </div>
+    <div id="browser"><p class="muted small">Loading…</p></div>
+    <div class="row" style="margin-top:14px; border-top:1px solid var(--border); padding-top:14px">
+      <div class="small muted" id="here-summary"></div>
+      <span class="spacer"></span>
+      <button class="btn" type="button" id="use-here">Write here</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='picker.js') }}"></script>
+<script>
+  const DATASET_ROOTS = {{ [project.dataset_root] | tojson }};
+
+  Picker.mount({
+    writable: true,
+    // Any folder is a valid destination here, empty or not.
+    selectable: function () { return true; },
+    onPick: function (path) {
+      document.getElementById('dest_path').value = path;
+      const box = document.getElementById('chosen');
+      box.textContent = path;
+      box.classList.remove('empty');
+      document.getElementById('go').disabled = false;
+
+      const leaf = path.replace(/^\/write\//, '/browse/');
+      const inDataset = DATASET_ROOTS.some(function (r) {
+        return r && (leaf === r || leaf.indexOf(r.replace(/\/$/, '') + '/') === 0);
+      });
+      document.getElementById('dataset-warning').style.display = inDataset ? '' : 'none';
+    }
+  });
+
+  document.getElementById('publish-form').addEventListener('submit', function () {
+    const b = document.getElementById('go');
+    b.disabled = true;
+    b.textContent = 'Writing…';
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,33 @@
+# Runtime dependencies, upper-bounded so a rebuild months from now does not
+# silently change training behaviour. torch/torchvision/torchaudio are NOT listed
+# here: the Dockerfile installs them first from the CUDA 12.8 index (required for
+# Blackwell / sm_120), and the build explicitly refuses to let anything downgrade
+# them. See Dockerfile.
+#
+# After a successful build the image contains /workspace/requirements.lock.txt
+# with exact resolved versions. Copy it out to reproduce that exact environment.
+
+ultralytics>=8.3.0,<8.4
+
+numpy>=1.26,<3
+pandas>=2.0,<3
+PyYAML>=6.0,<7
+Pillow>=10.0,<12
+tqdm>=4.65,<5
+matplotlib>=3.7,<4
+opencv-python>=4.8,<5
+lxml>=5.0,<7
+
+# web workbench
+flask>=3.0,<4
+gunicorn>=21.2,<24
+
+
+# ONNX export. Recent Ultralytics uses onnxslim for `simplify=True`; onnxsim is
+# kept for older pins.
+onnx>=1.15,<2
+onnxslim>=0.1.34
+onnxruntime>=1.17,<2
+
+# tests
+pytest>=7.4,<9

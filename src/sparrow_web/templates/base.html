@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}SPARROW Workbench{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="{{ url_for('index') }}">SPARROW Workbench</a>
+    {% block breadcrumb %}{% endblock %}
+    <nav>
+      <a href="{{ url_for('index') }}">Projects</a>
+      <a href="{{ url_for('system') }}">System</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script>
+    // A single EventSource for the whole page. Browsers allow only a handful of
+    // concurrent connections per origin, so one multiplexed stream is the only
+    // arrangement that survives a few open tabs.
+    window.Sparrow = (function () {
+      let source = null;
+      const handlers = {};
+
+      function connect(topics) {
+        if (source) source.close();
+        source = new EventSource('/stream?topics=' + encodeURIComponent(topics.join(',')));
+        source.onopen = () => document.querySelectorAll('.live').forEach(
+          el => el.classList.remove('stale'));
+        source.onerror = () => document.querySelectorAll('.live').forEach(
+          el => el.classList.add('stale'));   // EventSource reconnects by itself
+        for (const [type, fn] of Object.entries(handlers)) {
+          source.addEventListener(type, ev => {
+            try { fn(JSON.parse(ev.data)); } catch (e) { console.error(type, e); }
+          });
+        }
+      }
+      function on(type, fn) { handlers[type] = fn; }
+      return { connect, on };
+    })();
+
+    // Any [data-post] button starts work without leaving the page, and disables
+    // itself the moment it is clicked. The server also refuses a duplicate, but
+    // a button that still looks clickable invites the second click.
+    document.addEventListener('click', function (ev) {
+      const btn = ev.target.closest('[data-post]');
+      if (!btn || btn.disabled) return;
+      ev.preventDefault();
+      if (btn.dataset.confirm && !confirm(btn.dataset.confirm)) return;
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      fetch(btn.dataset.post, {method: 'POST', headers: {'Accept': 'application/json'}})
+        .then(function (r) {
+          if (!r.ok) throw new Error(r.status);
+          return r.json();
+        })
+        .then(function (d) {
+          btn.textContent = d.already_running ? 'Already running' : 'Started…';
+          if (window.Sparrow.onStarted) window.Sparrow.onStarted(d);
+        })
+        .catch(function () {
+          btn.disabled = false;
+          btn.textContent = original;
+          alert('Could not start that. Check the System page.');
+        });
+    });
+
+    function fmtDuration(seconds) {
+      if (seconds == null) return '-';
+      const s = Math.max(0, Math.round(seconds));
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+      if (h) return h + 'h ' + m + 'm';
+      if (m) return m + 'm';
+      return s + 's';
+    }
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

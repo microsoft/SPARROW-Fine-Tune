@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}New project · SPARROW{% endblock %}
+{% block content %}
+<h1>New project</h1>
+
+<div class="grid cols-2">
+  <div class="card">
+    {% if error %}<div class="notice bad" style="margin-bottom:16px">{{ error }}</div>{% endif %}
+
+    <form method="post" action="{{ url_for('create_project') }}">
+      <div class="field">
+        <label for="name">Project name</label>
+        <input type="text" id="name" name="name" placeholder="Sub Saharan v8" required
+               value="{{ request.form.get('name', '') }}">
+      </div>
+
+      <div class="field">
+        <label>Dataset folder</label>
+        <div id="chosen" class="picked empty">Nothing chosen yet — pick a folder on the right.</div>
+        <input type="hidden" id="dataset_root" name="dataset_root"
+               value="{{ request.form.get('dataset_root', '') }}">
+      </div>
+
+      <button class="btn primary" type="submit" id="submit" disabled>Create project</button>
+      <a class="btn" href="{{ url_for('index') }}">Cancel</a>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <h3>Choose a folder</h3>
+      <span class="spacer"></span>
+      <span id="crumbs" class="small muted"></span>
+    </div>
+
+    <div id="browser">
+      <p class="muted small">Loading…</p>
+    </div>
+
+    <div class="row" style="margin-top:14px; border-top:1px solid var(--border); padding-top:14px">
+      <div class="small muted" id="here-summary"></div>
+      <span class="spacer"></span>
+      <button class="btn" type="button" id="use-here">Use this folder</button>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>What gets written where</h3>
+  <table>
+    <tbody>
+      <tr>
+        <td><strong>Your dataset folder</strong>
+          <div class="small muted">Images and annotations</div></td>
+        <td><span class="badge good">never modified</span></td>
+      </tr>
+      <tr>
+        <td>Prepared training set
+          <div class="small muted">Links to your images, plus generated YOLO labels</div></td>
+        <td><span class="badge">rebuilt each time</span></td>
+      </tr>
+      <tr>
+        <td>Runs
+          <div class="small muted">Checkpoints, metrics and plots</div></td>
+        <td><span class="badge">appended</span></td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="small muted" style="margin-top:10px">
+    Your annotations are read, never edited. Decisions like merging a misspelt species
+    or excluding a class are stored in this project&#39;s settings, so the original files
+    stay exactly as your tagging tool wrote them.
+  </p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='picker.js') }}"></script>
+<script>
+function pick(path) {
+  document.getElementById('dataset_root').value = path;
+  const box = document.getElementById('chosen');
+  box.textContent = path;
+  box.classList.remove('empty');
+  document.getElementById('submit').disabled = false;
+  const name = document.getElementById('name');
+  if (!name.value) {
+    // Name it after the dataset folder, skipping generic path segments so
+    // ".../Sub_Saharan/images/v8" suggests "Sub Saharan v8" rather than "v8".
+    const parts = path.split('/').filter(Boolean);
+    const generic = /^(images|image|data|dataset|annotations|jpg|jpeg)$/i;
+    const useful = parts.filter(function (p) { return !generic.test(p); }).slice(-2);
+    name.value = useful.join(' ').replace(/[_-]+/g, ' ').trim();
+  }
+}
+
+Picker.mount({onPick: pick, start: '{{ roots[0] if roots else "" }}'});
+</script>
+{% endblock %}

@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Delete {{ project.name }}{% endblock %}
+{% block content %}
+
+<div class="row" style="margin-bottom:20px">
+  <a class="btn" href="{{ url_for('project', slug=project.slug) }}">← Back</a>
+  <div>
+    <h1 style="margin:0">Delete {{ project.name }}</h1>
+    <div class="small muted">This cannot be undone.</div>
+  </div>
+</div>
+
+{% if error %}<div class="notice bad" style="margin-bottom:16px">{{ error }}</div>{% endif %}
+
+<div class="grid cols-2">
+  <div>
+    <div class="card">
+      <h3>Your images and annotations are safe</h3>
+      <div class="picked" style="margin-top:10px">{{ plan.dataset_root }}</div>
+      <p class="small muted" style="margin-top:10px">
+        This folder is not deleted, emptied or modified. The workbench has only ever
+        read from it — everything it created lives somewhere else, and only that can
+        be removed here.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>What gets deleted</h3>
+      <table style="margin-top:6px">
+        <tbody>
+          <tr><td>Scans of the dataset</td><td class="num">{{ plan.n_snapshots }}</td></tr>
+          <tr><td>Training sets built</td><td class="num">{{ plan.n_prepared }}</td></tr>
+          <tr><td>Training runs</td><td class="num">{{ plan.n_runs }}</td></tr>
+          <tr><td>Model versions</td><td class="num">{{ plan.n_models }}</td></tr>
+        </tbody>
+      </table>
+      <p class="small muted" style="margin-top:10px">
+        The project's record of what was scanned, built and trained. Recreating it
+        means scanning and training again from the start.
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    {% if not plan.can_delete %}
+      <div class="notice warn">
+        <strong>Something is still running.</strong>
+        <ul style="margin:8px 0 0 18px; padding:0">
+          {% for reason in plan.blockers %}<li>{{ reason }}</li>{% endfor %}
+        </ul>
+        <p class="small" style="margin:10px 0 0">
+          Stop it first. Deleting now would leave it writing to files that no longer
+          exist.
+        </p>
+      </div>
+      <a class="btn" href="{{ url_for('project', slug=project.slug) }}"
+         style="margin-top:14px">Back to the project</a>
+    {% else %}
+      <form method="post" action="{{ url_for('delete_project', slug=project.slug) }}"
+            id="delete-form">
+        <div class="field">
+          <label>
+            <input type="checkbox" name="remove_files" id="remove_files" checked
+                   style="width:auto; margin-right:6px">
+            Also delete the generated files
+            {%- if plan.bytes_on_disk %} ({{ plan.bytes_on_disk|filesize }}){% endif %}
+          </label>
+          {% if plan.dirs %}
+            <div style="margin-top:8px">
+              {% for d in plan.dirs %}<div class="picked small">{{ d }}</div>{% endfor %}
+            </div>
+          {% endif %}
+          <p class="small muted" style="margin-top:8px">
+            Prepared training sets, checkpoints, logs and plots. Unchecking this keeps
+            them on disk, but nothing in the app will reference them any more — so
+            uncheck it only if you want to copy something out first.
+          </p>
+        </div>
+
+        <div class="field">
+          <label for="confirm">Type <strong>{{ project.name }}</strong> to confirm</label>
+          <input type="text" id="confirm" name="confirm" autocomplete="off"
+                 spellcheck="false" placeholder="{{ project.name }}">
+        </div>
+
+        <button class="btn danger" type="submit" id="delete-submit" disabled>
+          Delete this project</button>
+        <a class="btn" href="{{ url_for('project', slug=project.slug) }}">Cancel</a>
+      </form>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const input = document.getElementById('confirm');
+  if (input) {
+    const submit = document.getElementById('delete-submit');
+    const expected = {{ project.name|tojson }};
+    input.addEventListener('input', function () {
+      submit.disabled = input.value.trim() !== expected;
+    });
+    document.getElementById('delete-form').addEventListener('submit', function () {
+      submit.disabled = true;
+      submit.textContent = 'Deleting…';
+    });
+  }
+</script>
+{% endblock %}

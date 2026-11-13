@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Sparrow fine-tuning</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/ui/styles.css">
+  <script src="/ui/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="bg" aria-hidden="true"></div>
+
+  <div class="prototype-banner service-bar" role="note">
+    <strong>Sparrow fine-tuning</strong>
+    <span id="service-bar-text">Self-hosted model fine-tuning service</span>
+  </div>
+
+  <aside class="sidebar" id="sidenav" aria-label="Primary navigation">
+    <div class="sidebar-brand"><span class="wordmark">Sparrow fine-tuning</span></div>
+    <details class="sidebar-workspace" id="workspace-panel" open>
+      <summary>
+        <span class="scope-kicker">Workspace</span>
+        <span class="scope-current" id="current-workspace">No workspace yet</span>
+        <svg class="fold-chevron" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
+      </summary>
+      <div class="sidebar-workspace-body">
+        <p class="scope-meta" id="current-workspace-meta">Create one to start.</p>
+        <label class="scope-switch">Switch to <select id="workspace-select"></select></label>
+        <div class="scope-actions">
+          <button class="btn btn-lite compact" type="button" id="show-new-workspace">+ New workspace</button>
+          <button class="btn danger compact" type="button" id="delete-workspace">Delete</button>
+        </div>
+        <form class="scope-create" id="new-workspace-form" hidden>
+          <label>Workspace name <input type="text" id="new-workspace" placeholder="e.g. Field cameras" autocomplete="off"></label>
+          <div class="scope-create-buttons">
+            <button class="btn compact" type="submit" id="create-workspace">Create</button>
+            <button class="btn btn-lite compact" type="button" id="cancel-new-workspace">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </details>
+    <nav class="sidebar-nav">
+      <button class="nav-item active" type="button" data-page="data">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 3v4M16 3v4M4 9h16"></path></svg>
+        Prepare data
+      </button>
+      <button class="nav-item" type="button" data-page="jobs">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><path d="M12 8v5l3 2"></path></svg>
+        Training jobs
+        <span class="nav-badge" id="nav-job-badge" hidden>0</span>
+      </button>
+      <button class="nav-item" type="button" data-page="models">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5zM9 9h6v6H9z"></path></svg>
+        Models
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="project-chip">
+        <span class="muted-label">Signed in as</span>
+        <strong id="user-name">-</strong>
+        <small id="auth-method"></small>
+      </div>
+      <button class="nav-item" type="button" id="logout-btn" hidden>
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"></path></svg>
+        Sign out
+      </button>
+    </div>
+  </aside>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false" aria-controls="sidenav">
+        <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
+      </button>
+      <div class="topbar-project">
+        <span id="topbar-workspace">No workspace selected</span>
+        <small id="topbar-dataset">Model fine-tuning</small>
+      </div>
+      <div class="topbar-actions">
+        <button class="active-job-chip" id="active-job-chip" type="button" data-page="jobs" hidden>
+          <span class="pulse-dot"></span><span id="active-job-chip-text">Training in progress</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="container" id="main-content" tabindex="-1">
+      <div class="error-banner" id="error-banner" role="alert" hidden>
+        <span id="error-text"></span>
+        <button type="button" id="error-close" aria-label="Dismiss error">Dismiss</button>
+      </div>
+      <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+      <div class="busy-overlay" id="busy-overlay" role="status" aria-live="assertive" hidden>
+        <div class="busy-panel">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="busy-text">Working…</span>
+        </div>
+      </div>
+
+      <!-- ------------------------------------------------------------ login -->
+      <section class="view" id="view-login" data-view="login" hidden>
+        <article class="page-card login-card">
+          <div class="page-inner">
+            <header class="page-heading"><div><h1>Sign in</h1><p>This service requires an account.</p></div></header>
+            <form id="login-form">
+              <label>Username <input type="text" id="login-username" autocomplete="username" required></label>
+              <label>Password <input type="password" id="login-password" autocomplete="current-password" required></label>
+              <button class="btn" type="submit" id="login-submit">Sign in</button>
+            </form>
+          </div>
+        </article>
+      </section>
+
+      <!-- ------------------------------------------------------------ data -->
+      <section class="view" id="view-data" data-view="data" aria-labelledby="data-title" hidden>
+        <article class="page-card">
+          <div class="page-inner">
+            <header class="page-heading">
+              <div>
+                <p class="breadcrumb">Model fine-tuning</p>
+                <h1 id="data-title">Prepare training data</h1>
+                <p>Review images and labels, freeze an immutable snapshot, then train a model from it.</p>
+              </div>
+            </header>
+
+            <section class="scope-picker" aria-label="Dataset">
+              <div class="scope-panel" id="dataset-panel">
+                <p class="scope-kicker">Dataset</p>
+                <p class="scope-current" id="current-dataset">No dataset yet</p>
+                <p class="scope-meta" id="current-dataset-meta">Datasets belong to a workspace and have one task.</p>
+                <label class="check-inline" id="whole-image-row" hidden title="Off: the classifier trains on each box crop. On: it trains on the whole photo with one label per image.">
+                  <input type="checkbox" id="dataset-whole-image"> Train on whole images (no boxes)
+                </label>
+                <div class="scope-actions">
+                  <label class="scope-switch">Switch to <select id="dataset-select"></select></label>
+                  <button class="btn btn-lite compact" type="button" id="show-new-dataset">+ New dataset</button>
+                  <button class="btn danger compact" type="button" id="delete-dataset">Delete</button>
+                </div>
+                <form class="scope-create" id="new-dataset-form" hidden>
+                  <label>Dataset name <input type="text" id="new-dataset" placeholder="e.g. Night set" autocomplete="off"></label>
+                  <label>Task
+                    <select id="new-dataset-task">
+                      <option value="classification">Classification</option>
+                      <option value="detection">Detection</option>
+                    </select>
+                  </label>
+                  <label class="check-inline" id="new-dataset-whole-image-row"><input type="checkbox" id="new-dataset-whole-image"> Train on whole images (no boxes)</label>
+                  <div class="scope-create-buttons">
+                    <button class="btn compact" type="submit" id="create-dataset">Create dataset</button>
+                    <button class="btn btn-lite compact" type="button" id="cancel-new-dataset">Cancel</button>
+                  </div>
+                </form>
+              </div>
+              <div class="scope-panel" id="studio-scope-panel" hidden>
+                <p class="scope-kicker">Sparrow Studio project</p>
+                <p class="scope-current empty" id="current-studio-project">None selected</p>
+                <p class="scope-meta" id="studio-url"></p>
+                <div class="scope-actions">
+                  <label class="scope-switch">Project <select id="studio-project"><option value="">Loading projects…</option></select></label>
+                  <button class="btn btn-lite compact" type="button" id="studio-projects-refresh" aria-label="Reload Studio projects">Reload</button>
+                </div>
+              </div>
+            </section>
+
+            <div class="pipeline-picker">
+              <label for="pipeline-select">Fine-tuning pipeline<span>Only pipelines matching the dataset task are offered; planned ones are disabled.</span></label>
+              <select id="pipeline-select"></select>
+              <div class="pipeline-summary">
+                <span class="pipeline-icon" id="pipeline-icon">-</span>
+                <div>
+                  <div class="pipeline-title-line">
+                    <strong id="pipeline-name">No pipeline selected</strong>
+                    <span class="status-badge status-ready" id="pipeline-status" hidden></span>
+                  </div>
+                  <p id="pipeline-description"></p>
+                  <div class="pipeline-guide" id="pipeline-guide" hidden></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="workflow-steps" aria-label="Fine-tuning workflow">
+              <span class="current">1. Prepare data</span><span>2. Run training</span><span>3. Compare results</span><span>4. Activate model</span>
+            </div>
+
+            <div class="data-layout">
+              <div class="data-main">
+                <section class="section-card">
+                  <div class="section-head"><div><h2>Add data</h2><p>Upload images, then import labels. Camera Trap DP is the default label format; MS COCO, Pascal VOC and Sparrow JSON also work.</p></div></div>
+                  <p class="dataset-image-count" id="dataset-image-count" aria-live="polite"></p>
+                  <div class="upload-row">
+                    <input type="file" id="upload-files" accept="image/*" multiple hidden>
+                    <button class="btn btn-lite compact" type="button" id="upload-btn">Upload images</button>
+                    <progress id="upload-progress" max="1" value="0" hidden></progress>
+                    <span class="upload-status" id="upload-status" aria-live="polite"></span>
+                  </div>
+                  <div class="upload-row annotation-row">
+                    <label class="format-label" for="annotation-format">Label format</label>
+                    <select id="annotation-format">
+                      <option value="camtrapdp" selected>Camera Trap DP (.zip)</option>
+                      <option value="coco">MS COCO (.json or .zip)</option>
+                      <option value="voc">Pascal VOC (.zip, boxes only)</option>
+                      <option value="sparrow">Sparrow JSON (.json)</option>
+                    </select>
+                    <input type="file" id="annotations-file" accept=".zip,application/zip" hidden>
+                    <button class="btn btn-lite compact" type="button" id="import-annotations-btn">Import labels</button>
+                    <a class="btn btn-lite compact" id="export-annotations" href="#" download>Export</a>
+                    <span class="upload-status" id="annotations-status" aria-live="polite"></span>
+                  </div>
+                  <label class="check-inline overwrite-row" id="annotations-overwrite-label"><input type="checkbox" id="annotations-overwrite"> Overwrite labels on confirmed images</label>
+                  <p class="help-text format-help" id="annotation-format-help"></p>
+                  <p class="assist-warning format-warning" id="annotation-format-warning" role="note" hidden></p>
+                  <div class="assist-block" id="assist-block" hidden>
+                    <label class="check-inline assist-toggle"><input type="checkbox" id="assist-enable"> <span id="assist-enable-text">Pre-draw boxes with a detector</span></label>
+                    <div class="assist-body" id="assist-body" hidden>
+                      <p class="help-text" id="assist-help">MegaDetector (the default) finds animals, people and vehicles in camera-trap photos; relabel its boxes to species as you review, or name the species below. You can also pick a detector you trained here. Boxes arrive as pending, so review each one before training. Images that already have boxes or are confirmed are left alone unless you tick "Replace existing boxes". Excluded images are never touched.</p>
+                      <fieldset class="assist-scope" id="assist-scope">
+                        <legend>Run on</legend>
+                        <label class="check-inline"><input type="radio" name="assist-source" value="upload" checked> <span id="assist-source-upload-text">Only images I uploaded</span></label>
+                        <label class="check-inline" id="assist-source-all-row" hidden><input type="radio" name="assist-source" value="all"> <span id="assist-source-all-text">Uploaded and Studio-imported images</span></label>
+                      </fieldset>
+                      <div class="assist-warnings" id="assist-warnings"></div>
+                      <div class="inline-form studio-row">
+                        <select id="assist-model" aria-label="Detector model"></select>
+                        <label class="check-inline" id="assist-animal-row"><span id="assist-animal-text">Label animal boxes as</span>
+                          <input id="assist-animal-label" list="assist-label-list" placeholder="animal" autocomplete="off">
+                        </label>
+                        <label class="check-inline" id="assist-classifier-row" hidden title="SpeciesNet names the animal in each box crop. Its guess maps onto your labels by common name, Latin name or genus where it can.">
+                          <input type="checkbox" id="assist-speciesnet"> Name species with SpeciesNet
+                        </label>
+                        <datalist id="assist-label-list"></datalist>
+                        <label class="check-inline" title="Boxes scoring below this are not drawn. Lower it if a small or new detector draws nothing.">Minimum confidence
+                          <input type="number" id="assist-conf" min="0.01" max="1" step="0.01" value="0.25" style="width: 6.5em">
+                        </label>
+                        <label class="check-inline"><input type="checkbox" id="assist-overwrite"> <span id="assist-overwrite-text">Replace existing boxes</span></label>
+                        <button class="btn btn-lite compact" type="button" id="assist-btn" disabled>Pre-draw boxes…</button>
+                      </div>
+                      <div class="assist-confirm" id="assist-confirm" role="alertdialog" aria-labelledby="assist-confirm-title" hidden>
+                        <strong id="assist-confirm-title">Confirm pre-drawing boxes</strong>
+                        <ul id="assist-confirm-list"></ul>
+                        <div class="inline-form">
+                          <button class="btn compact" type="button" id="assist-confirm-btn">Yes, pre-draw boxes</button>
+                          <button class="btn btn-lite compact" type="button" id="assist-cancel-btn">Cancel</button>
+                        </div>
+                      </div>
+                      <p class="upload-status" id="assist-status" aria-live="polite"></p>
+                    </div>
+                  </div>
+                  <div class="assist-block studio-block" id="studio-panel" hidden>
+                    <p class="studio-hint" id="studio-hint">Choose a Sparrow Studio project at the top of the page to import its data or use its models.</p>
+                    <div class="assist-body studio-body" id="studio-body" hidden>
+                    <strong>Import reviewed data from Sparrow Studio</strong>
+                    <div class="inline-form studio-row">
+                      <button class="btn btn-lite compact" type="button" id="studio-import-btn">Import from Studio</button>
+                      <label class="check-inline"><input type="checkbox" id="studio-reviewed-only" checked> Reviewed only</label>
+                    </div>
+                    <p class="studio-uptodate" id="studio-uptodate" role="status" hidden></p>
+                    <div class="studio-models-block" id="studio-models-block">
+                    <strong>Models this service pushed to the Studio project</strong>
+                    <p>Pick one to use as starting weights for a new job of the same pipeline (image classifier or YOLO11 detector).</p>
+                    <p class="base-model-note" id="base-model-note" role="note" hidden></p>
+                    <div class="inline-form studio-row">
+                      <select id="studio-model-select" class="studio-model-pick" aria-label="Studio model"><option value="">No model selected</option></select>
+                      <button class="btn compact" type="button" id="studio-model-use">Use as base model</button>
+                      <button class="btn btn-lite compact" type="button" id="studio-model-clear" disabled>Clear selection</button>
+                    </div>
+                    <p class="studio-model-details" id="studio-model-details"></p>
+                    <p class="upload-status" id="studio-models-status" aria-live="polite"></p>
+                    </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="section-card">
+                  <div class="section-head">
+                    <div>
+                      <h2>Review the training examples</h2>
+                      <p>Confirm, correct, or exclude each example. Excluded examples are left out of the next snapshot.</p>
+                    </div>
+                    <label class="compact-filter" for="example-filter">Show
+                      <select id="example-filter">
+                        <option value="">All examples</option>
+                        <option value="pending">Pending</option>
+                        <option value="confirmed">Confirmed</option>
+                        <option value="excluded">Excluded</option>
+                        <option value="unlabelled">Not labelled</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="source-stats" id="review-counts">
+                    <div><strong id="count-pending">0</strong><span>pending</span></div>
+                    <div><strong id="count-confirmed">0</strong><span>confirmed</span></div>
+                    <div><strong id="count-excluded">0</strong><span>excluded</span></div>
+                  </div>
+                  <div class="example-grid" id="example-grid"></div>
+                  <p class="empty-note" id="example-empty">No examples yet.</p>
+                </section>
+              </div>
+
+              <aside class="snapshot-column">
+                <section class="section-card readiness">
+                  <h2>Training snapshot</h2>
+                  <p class="muted" id="snapshot-info">No snapshot yet.</p>
+                  <div class="class-balance" id="class-balance"></div>
+                  <a class="btn btn-lite full" id="snapshot-export" href="#" download hidden>Download snapshot</a>
+                  <button class="btn full" id="create-snapshot" type="button">Create immutable snapshot</button>
+                  <div class="base-model-field" id="start-weights-field" hidden>
+                    <label class="base-model-title" for="start-weights">Starting weights</label>
+                    <select id="start-weights">
+                      <option value="yolo11n.pt">YOLO11n (general objects)</option>
+                      <option value="mdv6-yolov10-c">MegaDetector v6 compact</option>
+                      <option value="mdv6-yolov10-e">MegaDetector v6 extra</option>
+                    </select>
+                    <p class="help-text" id="start-weights-help" aria-live="polite"></p>
+                  </div>
+                  <div class="base-model-field" id="base-model-field" hidden>
+                    <span class="base-model-title">Base model (starting weights)</span>
+                    <div class="base-model-info" id="base-model-info" aria-live="polite"></div>
+                  </div>
+                  <details class="training-settings" id="training-settings" hidden>
+                  <summary>Training settings (optional)</summary>
+                  <p class="help-text">The defaults suit most datasets. Change them only if a first model is not good enough.</p>
+                  <div class="base-model-field" id="epochs-field" hidden>
+                    <label class="base-model-title" for="epochs">Training length (passes over all photos)</label>
+                    <input type="number" id="epochs" min="1" max="1000" step="1" value="50">
+                    <p class="help-text" id="epochs-help">More passes can learn more but take longer.</p>
+                  </div>
+                  <div class="base-model-field" id="patience-field" hidden>
+                    <label class="check-inline"><input type="checkbox" id="early-stop" checked> Stop early when results stop improving</label>
+                    <label class="batch-size-label">after <input type="number" id="patience" min="1" max="1000" step="1" value="10"> passes without improvement</label>
+                    <p class="help-text" id="patience-help">Saves time; the best model so far is kept.</p>
+                  </div>
+                  <div class="base-model-field" id="val-fraction-field" hidden>
+                    <label class="base-model-title" for="val-fraction">Photos held back for checking</label>
+                    <select id="val-fraction">
+                      <option value="0.1">10%</option>
+                      <option value="0.15">15%</option>
+                      <option value="0.2" selected>20% (default)</option>
+                      <option value="0.25">25%</option>
+                      <option value="0.3">30%</option>
+                    </select>
+                    <p class="help-text">These photos are not trained on; they measure how well the model works. Photos from the same camera or sequence stay together.</p>
+                  </div>
+                  <div class="base-model-field" id="augment-field" hidden>
+                    <label class="check-inline"><input type="checkbox" id="augment" checked> Vary photos during training (flips, crops, colour changes)</label>
+                    <p class="help-text">Helps the model cope with new cameras and lighting. Turn off only if orientation or colour tells the classes apart.</p>
+                  </div>
+                  <div class="base-model-field" id="learning-speed-field" hidden>
+                    <label class="base-model-title" for="learning-speed">Learning speed</label>
+                    <select id="learning-speed">
+                      <option value="0.5">Cautious (half speed)</option>
+                      <option value="1" selected>Standard (default)</option>
+                      <option value="2">Fast (double speed)</option>
+                    </select>
+                    <p class="help-text">Cautious can help when training results jump around; Fast can help when the model learns too slowly. Standard suits most datasets.</p>
+                  </div>
+                  <div class="base-model-field" id="imgsz-field" hidden>
+                    <label class="base-model-title" for="imgsz">Training image size (pixels)</label>
+                    <select id="imgsz">
+                      <option value="640" selected>640</option>
+                      <option value="1280">1280</option>
+                    </select>
+                    <p class="help-text">Photos are resized to this size for training. 1280 finds small or distant animals better but uses about 4 times the GPU memory and time. It follows the starting weights; change it if needed.</p>
+                  </div>
+                  <div class="base-model-field" id="batch-field" hidden>
+                    <span class="base-model-title">Batch size (images per training step)</span>
+                    <label class="check-inline"><input type="checkbox" id="batch-auto"> Automatic: pick the largest batch the GPU memory fits</label>
+                    <label class="batch-size-label">Batch size <input type="number" id="batch-size" min="1" max="256" step="1" value="16"></label>
+                    <p class="help-text" id="batch-help">Default 16. Automatic falls back to a small batch on a CPU.</p>
+                  </div>
+                  <div class="base-model-field" id="target-accuracy-field" hidden>
+                    <label class="base-model-title" for="target-accuracy">Target accuracy for the confidence threshold</label>
+                    <select id="target-accuracy">
+                      <option value="0.95" selected>95% (default)</option>
+                      <option value="0.9">90%</option>
+                      <option value="0.85">85%</option>
+                      <option value="0.8">80%</option>
+                    </select>
+                    <p class="help-text">Predictions less confident than the threshold are labelled "unknown". A lower target labels fewer images "unknown" but makes more mistakes. With few images per class, try 90% or 85%.</p>
+                  </div>
+                  <div class="base-model-field" id="stock-model-field" hidden>
+                    <label class="base-model-title" for="stock-model">Compare with a stock model</label>
+                    <select id="stock-model">
+                      <option value="">No comparison</option>
+                    </select>
+                    <p class="help-text">After training, the stock model is scored on the same held-back photos. If it does better, the model page says so and activating the new model asks you to confirm.</p>
+                  </div>
+                  </details>
+                  <button class="btn btn-lite full" id="start-training" type="button" disabled>Start training</button>
+                  <p class="help-text">Later corrections create a new snapshot; existing ones never change.</p>
+                </section>
+              </aside>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <!-- ------------------------------------------------------------ jobs -->
+      <section class="view" id="view-jobs" data-view="jobs" aria-labelledby="jobs-title" hidden>
+        <article class="page-card">
+          <div class="page-inner">
+            <header class="page-heading">
+              <div>
+                <p class="breadcrumb">Model fine-tuning</p>
+                <h1 id="jobs-title">Training jobs</h1>
+                <p>Jobs run on the workers without the browser. Returning to this page resumes the live view.</p>
+                <p class="scope-note" id="jobs-scope"></p>
+              </div>
+            </header>
+
+            <div class="empty-state" id="job-empty">
+              <div class="empty-clock" aria-hidden="true"></div>
+              <h2>No job selected</h2>
+              <p>Create a snapshot and start training, or pick a job from the history.</p>
+            </div>
+
+            <div class="job-dashboard" id="job-dashboard" hidden>
+              <div class="job-head">
+                <div>
+                  <p class="breadcrumb" id="job-id">JOB</p>
+                  <h2 id="job-name">-</h2>
+                  <p id="job-recipe"></p>
+                  <p class="job-hardware" id="job-hardware" hidden></p>
+                </div>
+                <div class="job-status">
+                  <span class="status-badge" id="job-status">-</span>
+                </div>
+              </div>
+              <div class="job-layout">
+                <div class="job-primary">
+                  <section class="job-section">
+                    <div class="section-head">
+                      <div><h2 id="job-stage-title">-</h2><p>Current stage</p></div>
+                      <span id="job-time"></span>
+                    </div>
+                    <ol class="stage-list" id="stage-list"></ol>
+                  </section>
+                  <section class="job-section">
+                    <div class="section-head"><div><h2>Training measurements</h2><p>Points are added as the worker reports them.</p></div></div>
+                    <div class="chart-wrap"><canvas id="live-curve" width="760" height="300" aria-label="Live training measurements"></canvas></div>
+                    <div class="chart-legend" id="chart-legend"></div>
+                  </section>
+                  <p class="error-text muted" id="job-error" hidden></p>
+                </div>
+                <aside class="job-secondary">
+                  <section class="job-section">
+                    <h2>Actions</h2>
+                    <div class="button-row">
+                      <button class="btn danger" id="cancel-job" type="button">Cancel</button>
+                      <button class="btn btn-lite" id="retry-job" type="button" hidden>Retry</button>
+                    </div>
+                  </section>
+                  <section class="job-section"><h2>Job events</h2><ol class="event-list" id="event-list"></ol></section>
+                </aside>
+              </div>
+            </div>
+
+            <section class="section-card job-history">
+              <div class="section-head"><div><h2>Job history</h2><p>Select a job to follow it.</p></div></div>
+              <table class="data-table">
+                <thead><tr><th>Job</th><th>Pipeline</th><th>Snapshot</th><th>State</th><th>Created</th></tr></thead>
+                <tbody id="job-history"></tbody>
+              </table>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <!-- ------------------------------------------------------------ models -->
+      <section class="view" id="view-models" data-view="models" aria-labelledby="models-title" hidden>
+        <article class="page-card">
+          <div class="page-inner">
+            <header class="page-heading">
+              <div>
+                <p class="breadcrumb">Model fine-tuning</p>
+                <h1 id="models-title">Compare and activate models</h1>
+                <p>Every model version is immutable. Compare versions, then choose which one a project uses.</p>
+                <p class="scope-note" id="models-scope"></p>
+              </div>
+            </header>
+            <div class="model-layout">
+              <aside class="model-list" id="model-list" aria-label="Model versions"></aside>
+              <div class="model-detail" id="model-detail" hidden>
+                <section class="section-card model-summary">
+                  <div>
+                    <div class="model-badges">
+                      <span class="status-badge status-private" id="model-format">-</span>
+                      <span class="status-badge status-complete" id="model-active-badge" hidden>Active</span>
+                    </div>
+                    <h2 id="model-name">-</h2>
+                    <p id="model-description"></p>
+                    <button class="btn btn-lite compact" type="button" id="show-rename-model">Rename</button>
+                    <form class="scope-create" id="rename-model-form" hidden>
+                      <label>Model name <input type="text" id="rename-model" maxlength="100" placeholder="e.g. Amazon mammals v1" autocomplete="off"></label>
+                      <div class="scope-create-buttons">
+                        <button class="btn compact" type="submit" id="save-rename-model">Save name</button>
+                        <button class="btn btn-lite compact" type="button" id="cancel-rename-model">Cancel</button>
+                      </div>
+                    </form>
+                  </div>
+                  <div class="model-actions">
+                    <label class="muted">Local project <input type="text" id="deploy-project" value="default"></label>
+                    <button class="btn" id="activate-local" type="button">Activate locally</button>
+                    <label class="muted" id="studio-deploy-label" hidden>Studio project <select id="studio-deploy-project"><option value="">Loading projects…</option></select></label>
+                    <label class="muted" id="studio-detector-label" hidden>Detector <select id="studio-detector"><option value="">Current detector</option></select></label>
+                    <button class="btn btn-lite" id="activate-studio" type="button" hidden>Activate in Studio</button>
+                    <a class="btn btn-lite" id="model-download" href="#" download>Download artifact</a>
+                  </div>
+                </section>
+                <p class="stock-comparison" id="studio-detector-note" role="note" hidden></p>
+                <p class="install-status" id="studio-install-status" role="status" aria-live="polite" hidden></p>
+                <p class="stock-comparison" id="stock-comparison" role="note" hidden></p>
+                <p class="stock-comparison stock-worse" id="reference-comparison" role="note" hidden></p>
+                <div class="metrics-grid" id="metrics-grid"></div>
+                <section class="section-card threshold-info" id="threshold-info" hidden></section>
+                <section class="section-card" id="per-class-section" hidden>
+                  <div class="section-head"><div><h2>Results per class</h2><p>Measured on the validation images. "—" means the validation set had no boxes of that class.</p></div></div>
+                  <table class="per-class-table">
+                    <thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>mAP50</th><th>mAP50-95</th><th>Boxes</th></tr></thead>
+                    <tbody id="per-class-body"></tbody>
+                  </table>
+                </section>
+                <section class="section-card">
+                  <div class="section-head">
+                    <div><h2>Compare with another version</h2><p>Top-level numeric metrics side by side.</p></div>
+                    <label class="compact-filter">Compare with <select id="compare-select"></select></label>
+                  </div>
+                  <table class="data-table">
+                    <thead><tr><th>Metric</th><th id="compare-head-a">This</th><th id="compare-head-b">Other</th><th>Change</th></tr></thead>
+                    <tbody id="compare-body"></tbody>
+                  </table>
+                </section>
+                <section class="section-card">
+                  <div class="section-head"><div><h2>Version record</h2><p>What produced this model.</p></div></div>
+                  <dl class="summary-list" id="model-record"></dl>
+                </section>
+              </div>
+              <p class="empty-note" id="model-empty">No models yet. A model appears when a training job succeeds.</p>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+  <dialog class="box-editor" id="box-editor" aria-labelledby="box-editor-title">
+    <div class="box-editor-head">
+      <h2 id="box-editor-title">Edit boxes</h2>
+      <p class="muted" id="box-editor-image"></p>
+    </div>
+    <p class="help-text">Drag on the image to draw a box. Click a box to select it; drag it to move or drag a corner to resize. Arrow keys nudge the selected box (Shift for 10 px), Delete removes it, Enter saves, Esc closes without saving.</p>
+    <div class="box-stage" id="box-stage" tabindex="0" aria-label="Image with boxes">
+      <img id="box-editor-img" alt="" draggable="false">
+      <div class="box-layer" id="box-layer"></div>
+    </div>
+    <div class="box-editor-tools">
+      <label>Label of the selected box <select id="box-label"></select></label>
+      <span class="box-new-label" id="box-new-label-row" hidden>
+        <label>New label <input id="box-new-label" autocomplete="off" maxlength="128"></label>
+        <button class="btn btn-lite compact" type="button" id="box-new-label-add">Add label</button>
+      </span>
+      <button class="btn btn-lite compact" type="button" id="box-delete">Delete box</button>
+      <span class="muted" id="box-count" aria-live="polite"></span>
+      <span class="muted" id="box-label-log" aria-live="polite"></span>
+    </div>
+    <p class="box-editor-error" id="box-editor-error" role="alert" hidden></p>
+    <div class="box-editor-actions">
+      <button class="btn btn-lite" type="button" id="box-cancel">Cancel</button>
+      <button class="btn" type="button" id="box-save">Save boxes</button>
+    </div>
+  </dialog>
+  <dialog class="choice-dialog" id="choice-dialog" aria-labelledby="choice-title">
+    <h2 id="choice-title"></h2>
+    <p id="choice-message"></p>
+    <div class="choice-options" id="choice-options"></div>
+    <div class="choice-actions">
+      <button class="btn btn-lite" type="button" id="choice-cancel">Cancel</button>
+    </div>
+  </dialog>
+  <dialog class="image-viewer" id="image-viewer" aria-label="Image viewer">
+    <div class="image-viewer-stage">
+      <div class="image-viewer-frame">
+        <img id="image-viewer-img" alt="">
+        <div id="image-viewer-boxes"></div>
+      </div>
+    </div>
+    <div class="image-viewer-bar">
+      <button class="btn btn-lite" type="button" id="image-viewer-prev" aria-label="Previous image">&larr; Previous</button>
+      <p id="image-viewer-caption" aria-live="polite"></p>
+      <button class="btn btn-lite" type="button" id="image-viewer-next" aria-label="Next image">Next &rarr;</button>
+      <button class="btn" type="button" id="image-viewer-close">Close</button>
+    </div>
+  </dialog>
+</body>
+</html>

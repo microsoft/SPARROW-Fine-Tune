@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% from "_macros.html" import step_list, gpu_cards, stat %}
+{% block title %}{{ project.name }} · SPARROW{% endblock %}
+{% block content %}
+
+<div class="row" style="margin-bottom:20px">
+  <div>
+    <h1>{{ project.name }}</h1>
+    <div class="small muted mono">{{ project.dataset_root }}</div>
+  </div>
+  <span class="spacer"></span>
+  {% if latest_model %}<span class="badge accent">Current model v{{ latest_model.version }}</span>{% endif %}
+  <a class="btn" href="{{ url_for('confirm_delete', slug=project.slug) }}"
+     title="Delete this project. Your images and annotations are not touched.">Delete</a>
+</div>
+
+{% set stale = steps | selectattr('state', 'equalto', 'stale') | list %}
+{% if stale %}
+<div class="notice warn" style="margin-bottom:16px">
+  <strong>The dataset has changed since your training set was built.</strong>
+  Rebuild it to include the new images — existing images keep the split they were
+  in, so the new model stays comparable to the old one.
+  <div style="margin-top:10px">
+    <a class="btn primary" href="{{ url_for('review', slug=project.slug) }}">Review changes</a>
+  </div>
+</div>
+{% endif %}
+
+<div class="grid cols-2">
+  <div>
+    <div class="card">
+      <h3>Steps</h3>
+      {{ step_list(steps, project) }}
+    </div>
+
+    {% if runs %}
+    <div class="card">
+      <h3>Recent runs</h3>
+      <table>
+        <thead><tr><th>Run</th><th>State</th><th class="num">Epoch</th>
+          <th class="num">Best</th><th>Updated</th></tr></thead>
+        <tbody>
+          {% for r in runs %}
+          <tr>
+            <td><a href="{{ url_for('run_detail', slug=project.slug, run_id=r.id) }}">{{ r.name }}</a></td>
+            <td>
+              <span class="badge {{ 'good' if r.state == 'completed' else ('accent' if r.state == 'running' else ('bad' if r.state in ('failed','died') else '')) }}">{{ r.state }}</span>
+            </td>
+            <td class="num">{{ r.epoch or '-' }}{% if r.epochs %}/{{ r.epochs }}{% endif %}</td>
+            <td class="num">{{ r.best_fitness|metric }}</td>
+            <td class="small muted">{{ r.updated_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <div>
+    {% if snapshot %}
+    <div class="card">
+      <h3>Dataset</h3>
+      <div class="stats" style="margin-top:10px">
+        {{ stat('Images', snapshot.n_images|thousands) }}
+        {{ stat('Boxes', snapshot.n_boxes|thousands) }}
+        {{ stat('Species', snapshot.n_classes) }}
+        {{ stat('Issues', snapshot.n_issues|thousands,
+                bad = snapshot.n_issues > 0) }}
+      </div>
+      <p class="small muted" style="margin-top:12px">
+        Last scanned {{ snapshot.created_at }}.
+      </p>
+      <a class="btn" href="{{ url_for('review', slug=project.slug) }}">Data health</a>
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <h3>Annotate</h3>
+      <p class="small muted" style="margin:6px 0 12px">
+        Have a trained model draw the boxes on new images, correct what it got
+        wrong, and export the result. Runs on the spare GPU, so it does not hold
+        up training.
+      </p>
+      <a class="btn" href="{{ url_for('annotate', slug=project.slug) }}">
+        {{ 'Annotate new images' if latest_model else 'Set up a batch' }}</a>
+      {% if not latest_model %}
+        <p class="small muted" style="margin-top:10px">
+          No trained model yet, so there is nothing to make the first guess with.
+        </p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="row"><h3>Hardware</h3><span class="spacer"></span>
+        <span class="live">Live</span></div>
+      {{ gpu_cards([]) }}
+    </div>
+
+    {% if jobs %}
+    <div class="card">
+      <h3>Activity</h3>
+      <table>
+        <tbody>
+          {% for j in jobs %}
+          <tr>
+            <td>{{ j.kind }}</td>
+            <td><span class="badge {{ 'good' if j.state == 'succeeded' else ('accent' if j.state in ('running','leased') else ('bad' if j.state in ('failed','died') else '')) }}">{{ j.state }}</span></td>
+            <td class="small muted">{{ j.updated_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  var host = document.querySelector('#gpus');
+  Sparrow.on('gpu.sample', function (data) {
+    if (!host) return;
+    host.innerHTML = (data.gpus || []).map(function (g) {
+      return '<div class="gpu"><div class="head"><span class="n">GPU ' + g.index + '</span>'
+        + '<span class="muted small">' + g.name + '</span>'
+        + (g.display_attached ? '<span class="badge">display</span>' : '')
+        + '<span class="spacer"></span><span class="small mono">'
+        + (g.utilization_pct == null ? '-' : g.utilization_pct) + '%</span></div>'
+        + '<div class="bar"><span style="width:' + (g.utilization_pct || 0) + '%"></span></div>'
+        + '<div class="row small muted" style="gap:14px"><span>'
+        + (g.used_mb / 1024).toFixed(1) + ' / ' + Math.round(g.total_mb / 1024) + ' GiB</span>'
+        + '<span>' + (g.temperature_c == null ? '-' : g.temperature_c) + '°C</span>'
+        + '<span>' + (g.power_w == null ? '-' : Math.round(g.power_w)) + ' W</span></div></div>';
+    }).join('') || '<p class="muted small">No GPUs detected.</p>';
+  });
+  // Reload when a job or the project state changes, so the step list stays true
+  // without hand-rolling partial updates for every step.
+  // Show live counts against the running step rather than a bare "Running".
+  // A step action started work here; reload so the step flips to Running and
+  // its progress bar appears in place.
+  Sparrow.onStarted = function () { setTimeout(function () { location.reload(); }, 400); };
+
+  Sparrow.on('job.progress', function (d) {
+    const row = document.querySelector('.st-running .why');
+    if (row && d.total) {
+      row.textContent = (d.phase || 'Working') + ' — ' +
+        d.current.toLocaleString() + ' of ' + d.total.toLocaleString();
+    }
+    const bar = document.querySelector('.st-running .bar > span');
+    if (bar && d.total) bar.style.width = (100 * d.current / d.total).toFixed(1) + '%';
+  });
+  Sparrow.on('job.updated', function (d) {
+    if (d.state && d.state !== 'running') setTimeout(function () { location.reload(); }, 600);
+  });
+  Sparrow.on('snapshot.created', function () { location.reload(); });
+  Sparrow.connect(['gpu', 'jobs', 'project:{{ project.id }}']);
+</script>
+{% endblock %}
