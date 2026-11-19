@@ -566,6 +566,9 @@ class ConventionalClassifierTrainer(Trainer):
         """Extract ``weights.pt`` of the base bundle to ``workdir/base_weights.pt`` after checking it."""
         base = ctx.base_model
         path = Path(base["path"])
+        if base.get("origin") == "local":
+            ConventionalClassifierTrainer._stage_local_weights(ctx, path)
+            return
         with zipfile.ZipFile(path) as zf:
             names = set(zf.namelist())
             manifest = (
@@ -590,6 +593,41 @@ class ConventionalClassifierTrainer(Trainer):
         workdir = Path(ctx.workdir)
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "base_weights.pt").write_bytes(data)
+
+    @staticmethod
+    def _stage_local_weights(ctx: JobContext, path: Path) -> None:
+        """Re-validate a local ``sparrow-finetune/base-v1`` package and save its tensors for warm start.
+
+        The package is checked again in full (sha256, safetensors framing, exact ``resnet50``
+        keys, shapes, dtypes, finite values); nothing in it is unpickled or executed."""
+        import torch
+
+        from .. import base_models
+
+        base = ctx.base_model
+        if path.stat().st_size > base_models.MAX_LOCAL_PACKAGE_BYTES:
+            raise ValueError(f"base model {base['id']}: the stored package is too large")
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != base.get("sha256"):
+            raise ValueError(
+                f"base model {base['id']}: the stored package does not match its recorded sha256"
+            )
+        try:
+            facts, state = base_models.load_local_package(data)
+        except base_models.NotImportable as exc:
+            raise ValueError(f"base model {base['id']}: {exc}") from exc
+        if facts["model_arch"] != ctx.params["model"]:
+            raise ValueError(
+                f"base model {base['id']} is a {facts['model_arch']} model, "
+                f"but this job trains {ctx.params['model']}"
+            )
+        if list(facts["labels"]) != list(base["labels"]):
+            raise ValueError(
+                f"base model {base['id']}: the package labels differ from the recorded labels"
+            )
+        workdir = Path(ctx.workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        torch.save(state, workdir / "base_weights.pt")
 
     @staticmethod
     def _warm_start(ctx: JobContext, model, heads) -> None:

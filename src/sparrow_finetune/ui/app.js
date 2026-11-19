@@ -112,7 +112,9 @@ async function api(method, path, body, opts = {}) {
   const headers = {};
   if (method !== "GET" && method !== "HEAD") headers["X-Sparrow-CSRF"] = "1";
   let payload;
-  if (body instanceof Blob || body instanceof ArrayBuffer) {
+  if (body instanceof FormData) {
+    payload = body; // the browser sets the multipart Content-Type with its boundary
+  } else if (body instanceof Blob || body instanceof ArrayBuffer) {
     payload = body;
     headers["Content-Type"] = opts.contentType || "application/octet-stream";
   } else if (body !== undefined) {
@@ -585,8 +587,10 @@ function syncImgszToWeights() {
   $("#imgsz").value = String(START_WEIGHTS_IMGSZ[$("#start-weights").value] || 640);
 }
 
-// Pipelines that can start from a Studio model's weights (base_models.WARM_START_PIPELINES).
+// Pipelines that can start from a base model's weights (base_models.WARM_START_PIPELINES).
 const WARM_START_PIPELINES = new Set(["conventional_classifier", "yolo_detector", "dinov3_linear"]);
+// The pipeline a local ResNet-50 package (POST /v1/base-models/local) warm-starts.
+const LOCAL_BASE_PIPELINE = "conventional_classifier";
 
 function baseModelAllowed() {
   return WARM_START_PIPELINES.has($("#pipeline-select").value);
@@ -607,6 +611,7 @@ function applyBaseModelGate() {
     note.textContent = `${name} does not use a base model. Switch to the image classifier, DINOv3 or YOLO11 detector pipeline to start from a Studio model.`;
   }
   $("#studio-models-block").classList.toggle("gated", !allowed);
+  $("#local-base-model-block").hidden = $("#pipeline-select").value !== LOCAL_BASE_PIPELINE;
   // Keep the choice while a pipeline without base models is shown; drop it for another warm-start pipeline.
   if (allowed && state.baseModel && state.baseModel.row.pipeline !== $("#pipeline-select").value) state.baseModel = null;
   if (state.studioModels) fillStudioModels(state.studioModels);
@@ -1922,12 +1927,15 @@ async function loadLaunchProject() {
   refreshStudioStatus();
 }
 
-// The base model chosen in the Studio panel: { row, name, projectName } or null.
+// The chosen base model: { row, name, projectName } (projectName is null for a local package) or null.
 function renderBaseModel() {
   renderStartWeights();
   const box = $("#base-model-info");
   const chosen = state.baseModel;
   $("#studio-model-clear").disabled = !chosen || !baseModelAllowed();
+  $("#local-base-model-clear").disabled = !chosen;
+  const local = Boolean(chosen && chosen.row.origin === "local");
+  $("#local-base-model-select").value = local ? String(chosen.row.id) : "";
   if (!chosen) {
     const text = $("#pipeline-select").value === "yolo_detector"
       ? "None — training starts from the starting weights above."
@@ -1938,16 +1946,77 @@ function renderBaseModel() {
   const { row } = chosen;
   const labels = row.labels || [];
   const shown = labels.slice(0, 8).join(", ") + (labels.length > 8 ? `, +${labels.length - 8} more` : "");
+  const origin = local
+    ? `Local package (sha256 ${String(row.sha256).slice(0, 12)}) · base model #${row.id}`
+    : `From Studio project ${chosen.projectName} (Studio model ${row.studio_import_id}) · base model #${row.id}`;
   box.replaceChildren(
     el("strong", { text: chosen.name }),
     el("span", { text: `${row.model_arch} · ${labels.length} class${labels.length === 1 ? "" : "es"}: ${shown}` }),
-    el("span", { class: "muted", text: `From Studio project ${chosen.projectName} (Studio model ${row.studio_import_id}) · base model #${row.id}` }),
+    el("span", { class: "muted", text: origin }),
   );
 }
 
 function clearBaseModel() {
   state.baseModel = null;
   renderBaseModel();
+}
+
+function localBaseModelName(row) {
+  return `Local ${row.model_arch} package #${row.id}`;
+}
+
+// Local packages already uploaded to this service, for the picker under the base model.
+async function loadLocalBaseModels() {
+  const res = await api("GET", "/v1/base-models");
+  state.localBaseModels = (res.base_models || []).filter(
+    (r) => r.origin === "local" && r.pipeline === LOCAL_BASE_PIPELINE,
+  );
+  const sel = $("#local-base-model-select");
+  sel.replaceChildren(
+    el("option", { value: "", text: "No uploaded package selected" }),
+    ...state.localBaseModels.map((r) => el("option", {
+      value: String(r.id),
+      text: `${localBaseModelName(r)} · ${(r.labels || []).length} classes · ${String(r.sha256).slice(0, 12)}`,
+    })),
+  );
+  sel.disabled = !state.localBaseModels.length;
+  renderBaseModel();
+}
+
+function chooseLocalBaseModel() {
+  const id = Number($("#local-base-model-select").value);
+  const row = (state.localBaseModels || []).find((r) => r.id === id);
+  state.baseModel = row ? { row, name: localBaseModelName(row), projectName: null } : null;
+  renderBaseModel();
+}
+
+async function uploadLocalBaseModel() {
+  if ($("#pipeline-select").value !== LOCAL_BASE_PIPELINE) {
+    throw new Error("A local ResNet-50 package is a base model for the image classifier pipeline only.");
+  }
+  const input = $("#local-base-model-file");
+  const file = input.files && input.files[0];
+  if (!file) throw new Error("Choose a ResNet-50 package (.zip) first.");
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const btn = $("#local-base-model-upload");
+  const status = $("#local-base-model-status");
+  btn.disabled = true;
+  status.textContent = `Checking ${file.name}…`;
+  try {
+    const row = await api("POST", "/v1/base-models/local", form);
+    await loadLocalBaseModels();
+    state.baseModel = { row, name: file.name, projectName: null };
+    renderBaseModel();
+    input.value = "";
+    status.textContent = `${file.name} accepted as base model #${row.id}.`;
+    toast(`${file.name} will be the base model for the next ${pipelineName(row.pipeline)} job`);
+  } catch (err) {
+    status.textContent = "";
+    throw err;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function studioModelName(m) {
@@ -2100,7 +2169,11 @@ async function startTraining() {
     params.batch = batchParam(pipeline);
     params.imgsz = Number($("#imgsz").value);
   }
-  if (pipeline === "conventional_classifier") params.batch = batchParam(pipeline);
+  if (pipeline === "conventional_classifier") {
+    params.batch = batchParam(pipeline);
+    // A base model fixes the network the job trains (a local package is always resnet50).
+    if (params.base_model_id) params.model = state.baseModel.row.model_arch;
+  }
   if (CLASSIFIER_PIPELINES.has(pipeline)) {
     params.threshold_target_accuracy = Number($("#target-accuracy").value);
     if ($("#stock-model").value) params.stock_model = $("#stock-model").value;
@@ -2838,6 +2911,7 @@ async function boot() {
     loadStudioProjects().catch((err) => showError(err.message));
   }
   renderBaseModel();
+  loadLocalBaseModels().catch((err) => showError(err.message));
   // Opened from Studio for a project already loaded here: go to its workspace.
   const linked = launch.project && !launch.load
     ? (await api("GET", "/v1/workspaces")).workspaces.find((w) => w.studio_project === launch.project)
@@ -2937,6 +3011,9 @@ function bind() {
   $("#studio-import-btn").addEventListener("click", guarded(studioImport));
   $("#studio-reviewed-only").addEventListener("change", refreshStudioStatus);
   $("#studio-model-clear").addEventListener("click", clearBaseModel);
+  $("#local-base-model-clear").addEventListener("click", clearBaseModel);
+  $("#local-base-model-select").addEventListener("change", chooseLocalBaseModel);
+  $("#local-base-model-upload").addEventListener("click", guarded(uploadLocalBaseModel));
   $("#studio-projects-refresh").addEventListener("click", guarded(async () => {
     await loadStudioProjects();
     // Reload also picks up models pushed to the chosen project since it was listed.

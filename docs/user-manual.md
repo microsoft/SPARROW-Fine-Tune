@@ -92,6 +92,47 @@ and `SPARROW_FT_WEIGHTS_DIR=/weights` in `.env.service`. Then start with
 
 Datasets and snapshots can be exported as VOC, COCO or Camtrap DP.
 
+### Starting from your own ResNet-50 (no Studio needed)
+
+The image classifier pipeline (`conventional_classifier`) can start from ResNet-50 weights
+you trained elsewhere. Build a package with Sparrow Uploader:
+
+```bash
+sparrow-uploader prepare-finetune --weights resnet50.safetensors --labels labels.txt --output package.zip
+```
+
+Then, with the image classifier pipeline selected, choose the `.zip` under **Base model →
+Your own ResNet-50**, and click **Upload and use**. The package then appears in the picker
+below it for later jobs. When the job starts it trains `resnet50` from those weights. If the
+package's labels match the snapshot's labels in the same order, the classifier head is reused;
+otherwise the head is re-initialised and only the backbone is loaded.
+
+The service accepts only this package format (`sparrow-finetune/base-v1`) and checks it in
+full before storing anything:
+
+- The ZIP has exactly two uncompressed members: `manifest.json` and `weights.safetensors`.
+- `manifest.json` gives `schema`, `pipeline: conventional_classifier`,
+  `model_arch: resnet50`, `labels`, and `files["weights.safetensors"]` (its sha256).
+- Labels: 1 to 100,000 distinct, non-blank names of at most 256 characters each. They have
+  no surrounding whitespace and no control characters, and their count must match the
+  classifier head.
+- `weights.safetensors` (at most 1 GiB) must hold exactly the tensor names, shapes and dtypes
+  of timm `resnet50`, with finite values only.
+
+Pickle files (`.pt`, `.pth`) and any other code are rejected, and nothing in the package
+is executed. Uploading the same bytes again returns the existing base model. A rejected package
+returns HTTP 422 with the reason.
+
+To upload without the web app:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -F file=@package.zip http://host:8000/v1/base-models/local
+```
+
+Then start the job with `{"params": {"base_model_id": <id>, "model": "resnet50"}}`.
+Local base models are stored privately in this service; they are not linked to any Studio
+project.
+
 ## 5. Sparrow Studio integration (optional)
 
 With Studio, the fine-tune app is opened from Studio's "Model fine-tune" page, imports a
@@ -120,6 +161,7 @@ All routes are under `/v1`. The OpenAPI schema is at `/openapi.json`, with inter
 | Snapshots | `POST /datasets/{id}/snapshots`, `/snapshots/{id}` |
 | Pipelines, jobs | `GET /pipelines`, `POST /jobs`, `/jobs/{id}`, `/jobs/{id}/events`, `/jobs/{id}/stream` (server-sent events), `cancel`, `retry` |
 | Models | `/models`, `/models/{id}`, `/models/{id}/artifact`, `POST /models/{id}/activate`, `/deployments`, `/stock-models` |
+| Base models (warm start) | `GET /base-models`, `POST /base-models/local` (multipart field `file`: a ResNet-50 package, section 4), `POST /connectors/studio/models/import` |
 
 ## 7. Command line
 

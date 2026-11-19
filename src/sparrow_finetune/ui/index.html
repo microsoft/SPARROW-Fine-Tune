@@ -317,6 +317,17 @@
                   <div class="base-model-field" id="base-model-field" hidden>
                     <span class="base-model-title">Base model (starting weights)</span>
                     <div class="base-model-info" id="base-model-info" aria-live="polite"></div>
+                    <div class="local-base-model" id="local-base-model-block" hidden>
+                      <label class="base-model-title" for="local-base-model-file">Your own ResNet-50 (local package)</label>
+                      <p class="help-text">A .zip made by <code>sparrow-uploader prepare-finetune</code> from ResNet-50 weights and their class names. It is checked in full before use; Sparrow Studio is not needed.</p>
+                      <input type="file" id="local-base-model-file" accept=".zip,application/zip">
+                      <div class="inline-form local-base-row">
+                        <button class="btn btn-lite compact" type="button" id="local-base-model-upload">Upload and use</button>
+                        <button class="btn btn-lite compact" type="button" id="local-base-model-clear" disabled>Clear base model</button>
+                      </div>
+                      <select id="local-base-model-select" aria-label="Uploaded local base model"><option value="">No uploaded package selected</option></select>
+                      <p class="upload-status" id="local-base-model-status" aria-live="polite"></p>
+                    </div>
                   </div>
                   <details class="training-settings" id="training-settings" hidden>
                   <summary>Training settings (optional)</summary>
