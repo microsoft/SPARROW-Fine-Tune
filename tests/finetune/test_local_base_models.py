@@ -487,7 +487,10 @@ def test_ui_uploads_and_selects_local_base_model_without_studio(
             expect(info).to_contain_text("resnet50", timeout=60_000)
             expect(info).to_contain_text("3 classes")
             expect(info).not_to_contain_text("Studio model")
-            (row,) = base_models(client)
+            assert client.get("/v1/base-models").status_code == 401
+            listing = page.request.get(f"{standalone_server}/v1/base-models")
+            assert listing.status == 200
+            (row,) = listing.json()["base_models"]
             with page.expect_request(
                 lambda r: r.method == "POST" and r.url.endswith("/v1/jobs")
             ) as req:
