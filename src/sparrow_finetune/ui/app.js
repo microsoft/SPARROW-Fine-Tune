@@ -1436,8 +1436,8 @@ async function createWorkspace() {
   const ws = await api("POST", "/v1/workspaces", { name });
   toggleCreate("workspace", false);
   state.datasetId = null;
-  await loadWorkspaces(ws.id);
   toast(`Workspace "${ws.name}" created`);
+  await loadWorkspaces(ws.id);
 }
 
 async function createDataset() {
@@ -1450,8 +1450,8 @@ async function createDataset() {
     whole_image: $("#new-dataset-task").value === "classification" && $("#new-dataset-whole-image").checked,
   });
   toggleCreate("dataset", false);
-  await loadDatasets(ds.id);
   toast(`Dataset "${ds.name}" created`);
+  await loadDatasets(ds.id);
 }
 
 // Deletion is permanent, so the user types the exact name; anything else cancels.
