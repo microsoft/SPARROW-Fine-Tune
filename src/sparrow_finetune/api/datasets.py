@@ -1043,41 +1043,77 @@ def _dumps(obj) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
+class SnapshotIn(BaseModel):
+    # Crop-trained classification only. ``None`` refuses a snapshot while uploaded images carry
+    # a label but no box (409, names listed). ``"exclude"`` leaves those images out of this
+    # snapshot only; their labels and review status are not changed.
+    missing_boxes: Optional[Literal["exclude"]] = None
+    # Optional guard for ``"exclude"``: the ``needs_boxes`` names the user agreed to leave out
+    # (from ``GET .../crop-prep``). Any other image needing a box (added meanwhile) is a 409.
+    exclude_images: Optional[list[str]] = None
+
+
+_SNAPSHOT_ROWS_SQL = """
+    SELECT i.name, i.object_key, i.sha256, i.width, i.height, i.source, it.group_name,
+           coalesce(jsonb_agg(jsonb_build_object('label', a.label, 'bbox', a.bbox) ORDER BY a.id)
+                    FILTER (WHERE a.id IS NOT NULL), '[]'::jsonb) AS annotations
+    FROM dataset_items it
+    JOIN dataset_images i ON i.id = it.image_id
+    LEFT JOIN annotations a ON a.item_id = it.id
+    WHERE it.dataset_id = %s AND it.review_status <> 'excluded'
+    GROUP BY it.id, i.id
+    ORDER BY i.name
+"""
+
+
+def _needs_boxes_conflict(message: str, names: list) -> HTTPException:
+    return HTTPException(409, {"message": message, "needs_boxes": names})
+
+
 @router.post("/datasets/{dataset_id}/snapshots", status_code=201)
-def create_snapshot(dataset_id: int, request: Request):
+def create_snapshot(
+    dataset_id: int, request: Request, body: Optional[SnapshotIn] = None
+):
+    body = body or SnapshotIn()
     with connect(_url(request)) as conn:
+        # The row lock serialises this with annotation writes (they lock the dataset row too),
+        # so the crop plan checked below is exactly what gets written.
         dataset = conn.execute(
             "SELECT * FROM datasets WHERE id = %s FOR UPDATE", (dataset_id,)
         ).fetchone()
         if dataset is None:
             raise HTTPException(404, f"dataset {dataset_id} not found")
-        rows = conn.execute(
-            """
-            SELECT i.name, i.object_key, i.sha256, i.width, i.height, i.source, it.group_name,
-                   coalesce(jsonb_agg(jsonb_build_object('label', a.label, 'bbox', a.bbox) ORDER BY a.id)
-                            FILTER (WHERE a.id IS NOT NULL), '[]'::jsonb) AS annotations
-            FROM dataset_items it
-            JOIN dataset_images i ON i.id = it.image_id
-            LEFT JOIN annotations a ON a.item_id = it.id
-            WHERE it.dataset_id = %s AND it.review_status <> 'excluded'
-            GROUP BY it.id, i.id
-            ORDER BY i.name
-            """,
-            (dataset_id,),
-        ).fetchall()
+        rows = conn.execute(_SNAPSHOT_ROWS_SQL, (dataset_id,)).fetchall()
         if not rows:
             raise HTTPException(
                 422,
                 f"dataset {dataset_id} has no annotated items to snapshot"
                 " (excluded items are left out)",
             )
-        rows, left_out = _crop_training_rows(dataset, rows)
+        plan = _crop_plan(dataset, rows)
+        rows = plan["kept"]
         if not rows:
             raise HTTPException(
                 422,
                 f"dataset {dataset_id} trains on box crops but no item has a box: draw boxes,"
                 " run assisted labelling, or turn on whole-image training",
             )
+        needs = plan["needs_boxes"]
+        if needs and body.missing_boxes != "exclude":
+            raise _needs_boxes_conflict(
+                f"{len(needs)} uploaded image(s) have a label but no box, so they cannot train"
+                " as crops: draw boxes, run assisted labelling, or create the snapshot with"
+                ' missing_boxes="exclude" to leave them out of it',
+                needs,
+            )
+        if needs and body.exclude_images is not None:
+            unexpected = sorted(set(needs) - set(body.exclude_images))
+            if unexpected:
+                raise _needs_boxes_conflict(
+                    f"{len(unexpected)} more image(s) need a box than were chosen for"
+                    " exclusion; review them before leaving them out",
+                    unexpected,
+                )
 
         canon = [(_canonical(r), r) for r in rows]
         canon.sort(key=lambda pair: _dumps(pair[0]))
@@ -1112,28 +1148,91 @@ def create_snapshot(dataset_id: int, request: Request):
                     for pos, (c, r) in enumerate(canon)
                 ],
             )
-    return {**snap, "left_out": left_out}
+    return {
+        **snap,
+        "left_out": len(needs) + len(plan["unlabelled"]),
+        "excluded_without_boxes": needs,
+    }
 
 
-def _crop_training_rows(dataset: dict, rows: list) -> tuple[list, int]:
-    """Rows a snapshot keeps, and how many were left out.
+def _crop_plan(dataset: dict, rows: list) -> dict:
+    """What a snapshot keeps from the non-excluded item ``rows``, and why the rest is out.
 
     A classification dataset trains on box crops unless ``whole_image`` is on. An item with
-    boxes keeps only its boxes; an image-level label on an uploaded image would train on the
-    whole frame, so such items are left out. Studio imports are already crops and keep their
-    image-level labels."""
+    boxes keeps only its boxes (``boxed``). Studio imports are already crops and keep their
+    image-level labels (``studio_crops``). An uploaded image with labels but no box would train
+    on the whole frame: it is listed in ``needs_boxes`` and blocks a snapshot until the user
+    draws boxes, runs assist or explicitly excludes it. An uploaded item with no annotation has
+    nothing to train on (``unlabelled``). Other datasets keep every row."""
+    plan = {"kept": [], "boxed": [], "studio_crops": [], "needs_boxes": [], "unlabelled": []}
     if dataset["task"] != "classification" or dataset["whole_image"]:
-        return rows, 0
-    kept, left_out = [], 0
+        plan["kept"] = list(rows)
+        return plan
     for r in rows:
         boxes = [a for a in r["annotations"] if a.get("bbox") is not None]
         if boxes:
-            kept.append({**r, "annotations": boxes})
+            plan["kept"].append({**r, "annotations": boxes})
+            plan["boxed"].append(r["name"])
         elif r["source"] == "studio":
-            kept.append(r)
+            plan["kept"].append(r)
+            plan["studio_crops"].append(r["name"])
+        elif r["annotations"]:
+            plan["needs_boxes"].append(r["name"])
         else:
-            left_out += 1
-    return kept, left_out
+            plan["unlabelled"].append(r["name"])
+    return plan
+
+
+def _crop_prep(conn, dataset: dict) -> dict:
+    rows = conn.execute(_SNAPSHOT_ROWS_SQL, (dataset["id"],)).fetchall()
+    no_item = [
+        r["name"]
+        for r in conn.execute(
+            "SELECT i.name FROM dataset_images i WHERE i.dataset_id = %s AND NOT EXISTS"
+            " (SELECT 1 FROM dataset_items it WHERE it.image_id = i.id)",
+            (dataset["id"],),
+        ).fetchall()
+    ]
+    excluded = conn.execute(
+        "SELECT count(*) AS n FROM dataset_items"
+        " WHERE dataset_id = %s AND review_status = 'excluded'",
+        (dataset["id"],),
+    ).fetchone()["n"]
+    if dataset["task"] != "classification":
+        mode = "detection"
+    else:
+        mode = "whole_image" if dataset["whole_image"] else "crop"
+    plan = _crop_plan(dataset, rows)
+    if mode == "crop":
+        boxed, unlabelled = len(plan["boxed"]), plan["unlabelled"]
+    else:
+        boxed = sum(
+            1 for r in rows if any(a.get("bbox") is not None for a in r["annotations"])
+        )
+        unlabelled = [r["name"] for r in rows if not r["annotations"]]
+    return {
+        "mode": mode,
+        "boxed": boxed,
+        "studio_crops": len(plan["studio_crops"]),
+        "needs_boxes": plan["needs_boxes"],
+        "unlabelled": sorted(unlabelled + no_item),
+        "excluded": excluded,
+    }
+
+
+@router.get("/datasets/{dataset_id}/crop-prep")
+def crop_prep(dataset_id: int, request: Request):
+    """What a snapshot would do with each image, shown before the user creates one.
+
+    ``mode`` is ``crop`` (classification trained on box crops), ``whole_image`` or
+    ``detection``; only ``crop`` ever lists ``needs_boxes``. ``boxed`` and ``studio_crops``
+    count images that train as they are. ``needs_boxes`` names uploaded images with a label but
+    no box; a snapshot is refused (409) until each is boxed (drawn, or assist with
+    ``needs_boxes_only``) or the snapshot is created with ``missing_boxes="exclude"``.
+    ``unlabelled`` names images with no label (never in a snapshot) and ``excluded`` counts
+    items a reviewer excluded."""
+    with connect(_url(request)) as conn:
+        return _crop_prep(conn, _dataset_or_404(conn, dataset_id))
 
 
 @router.get("/datasets/{dataset_id}/snapshots")
@@ -1637,6 +1736,9 @@ class AssistIn(BaseModel):
     # Only label images from these sources ("upload": added in this app, "studio": imported
     # from Sparrow Studio). None means every image.
     sources: Optional[list[Literal["upload", "studio"]]] = Field(default=None, min_length=1)
+    # Crop-trained classification only: label just the images ``crop-prep`` lists under
+    # ``needs_boxes`` (reviewed boxes and Studio crops are never re-detected).
+    needs_boxes_only: bool = False
 
 
 @router.get("/assist/models")
@@ -1719,7 +1821,8 @@ def assist_labels(dataset_id: int, body: AssistIn, request: Request):
     On a whole-image dataset (FT-38) the boxes are folded into image-level labels on write.
 
     Targets are ``images`` (by name) or every image in the dataset, narrowed to ``sources``
-    when given (images from other sources are skipped). Excluded items are never
+    when given (images from other sources are skipped), or to the crop-prep ``needs_boxes``
+    images with ``needs_boxes_only``. Excluded items are never
     touched; confirmed items, and items that already have boxes, are skipped unless
     ``overwrite`` is set. An image with no detections above ``conf`` is left unchanged."""
     settings = request.app.state.settings
@@ -1758,13 +1861,20 @@ def assist_labels(dataset_id: int, body: AssistIn, request: Request):
                 )
         images, items = _dataset_images_and_items(conn, dataset_id)
         known = _dataset_labels(conn, dataset_id)
+        needs_boxes = None
+        if body.needs_boxes_only:
+            if task != "classification" or dataset["whole_image"]:
+                raise HTTPException(
+                    422, "needs_boxes_only applies to crop-trained classification datasets only"
+                )
+            needs_boxes = set(_crop_prep(conn, dataset)["needs_boxes"])
     if body.images is not None:
         missing = sorted({n for n in body.images if n not in images})
         if missing:
             raise HTTPException(422, f"unknown images in dataset {dataset_id}: {missing}")
         names = list(dict.fromkeys(body.images))
     else:
-        names = sorted(images)
+        names = sorted(images if needs_boxes is None else needs_boxes & set(images))
     allowed = set(body.sources) if body.sources is not None else set(IMAGE_SOURCES)
     if body.images is None:
         names = [n for n in names if images[n]["source"] in allowed]
@@ -1773,6 +1883,9 @@ def assist_labels(dataset_id: int, body: AssistIn, request: Request):
     targets = []
     for name in names:
         item = items.get(images[name]["id"])
+        if needs_boxes is not None and name not in needs_boxes:
+            skipped.append({"image": name, "reason": "image does not need a box"})
+            continue
         if images[name]["source"] not in allowed:
             skipped.append(
                 {"image": name, "reason": f"image source is {images[name]['source']}, not in sources"}

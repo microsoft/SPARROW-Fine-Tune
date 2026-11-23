@@ -348,6 +348,18 @@ class DinoV3LinearTrainer(Trainer):
                 f"parameter base_model_id must be a positive integer (an imported base model id), "
                 f"got {base_model_id!r}"
             )
+        parent_model_id = params.pop("parent_model_id", None)
+        if parent_model_id is not None and (
+            not isinstance(parent_model_id, int)
+            or isinstance(parent_model_id, bool)
+            or parent_model_id < 1
+        ):
+            raise ValueError(
+                f"parameter parent_model_id must be a positive integer (a finished model id), "
+                f"got {parent_model_id!r}"
+            )
+        if base_model_id is not None and parent_model_id is not None:
+            raise ValueError("set base_model_id or parent_model_id, not both")
         unknown = sorted(set(params) - set(_PARAMS))
         if unknown:
             raise ValueError(f"unknown parameter(s): {', '.join(unknown)}")
@@ -385,6 +397,8 @@ class DinoV3LinearTrainer(Trainer):
             )
         if base_model_id is not None:
             out["base_model_id"] = base_model_id
+        if parent_model_id is not None:
+            out["parent_model_id"] = parent_model_id
         return out
 
     # ------------------------------------------------------------------ prepare
@@ -542,9 +556,10 @@ class DinoV3LinearTrainer(Trainer):
         base_embedder = manifest.get("embedder") or {}
         if base_embedder.get("model_hash") != embedder.model_hash:
             raise ValueError(
-                f"base model {base['id']} was trained on embedder {base_embedder.get('id')!r} "
-                f"(model hash {base_embedder.get('model_hash')!r}), but this worker embeds with "
-                f"{embedder.id!r} (model hash {embedder.model_hash!r}); its head cannot be reused"
+                f"{base.get('kind', 'base')} model {base['id']} was trained on encoder "
+                f"{base_embedder.get('id')!r} (model hash {base_embedder.get('model_hash')!r}), "
+                f"but this worker embeds with {embedder.id!r} (model hash "
+                f"{embedder.model_hash!r}); a different encoder means its head cannot be reused"
             )
         workdir = Path(ctx.workdir)
         workdir.mkdir(parents=True, exist_ok=True)
@@ -590,7 +605,7 @@ class DinoV3LinearTrainer(Trainer):
         )
         ctx.emit(
             "train",
-            f"warm start from base model {base['id']}: {detail}",
+            f"warm start from {base.get('kind', 'base')} model {base['id']}: {detail}",
             base_model_id=base["id"],
             reused_labels=len(shared),
         )
@@ -1082,4 +1097,6 @@ class DinoV3LinearTrainer(Trainer):
             metadata["stock_model"] = stock["id"]
         if ctx.params.get("base_model_id") is not None:
             metadata["base_model_id"] = ctx.params["base_model_id"]
+        if ctx.params.get("parent_model_id") is not None:
+            metadata["parent_model_id"] = ctx.params["parent_model_id"]
         return ExportResult(path=path, format="onnx-bundle", metadata=metadata)

@@ -18,7 +18,8 @@ point of a new job of the same pipeline with ``base_model_id``:
 A base model can also be a local package (``origin='local'``), uploaded with
 ``POST /v1/base-models/local`` and built by ``sparrow-uploader prepare-finetune``: a ZIP_STORED
 archive (``schema=sparrow-finetune/base-v1``) with exactly ``manifest.json`` and
-``weights.safetensors`` holding a timm ``resnet50`` state dict for ``conventional_classifier``.
+``weights.safetensors`` holding a timm ``resnet50`` or ``efficientnet_b0`` state dict (the
+manifest's ``model_arch``) for ``conventional_classifier``.
 The weights are parsed as safetensors only (never unpickled) and must match the timm network's
 tensor names, shapes and dtypes exactly, with one head row per label. A local row has no Studio ids.
 """
@@ -63,7 +64,9 @@ COLUMNS = (
 # package it writes is accepted; each is checked before the allocation it bounds.
 LOCAL_SCHEMA = "sparrow-finetune/base-v1"
 LOCAL_PIPELINE = "conventional_classifier"
-LOCAL_ARCH = "resnet50"
+LOCAL_ARCH = "resnet50"  # the default architecture of a local package
+# timm architectures a local package may declare; the tensors must match the declared one exactly.
+LOCAL_ARCHS = ("resnet50", "efficientnet_b0")
 LOCAL_MANIFEST = "manifest.json"
 LOCAL_WEIGHTS = "weights.safetensors"
 LOCAL_ARTIFACT = "local_base.zip"
@@ -107,11 +110,27 @@ def _sha(data: bytes) -> str:
 
 
 def public(row: dict) -> dict:
-    """A ``base_models`` row as the API returns it (no object-store key)."""
+    """A ``base_models`` row as the API returns it (no object-store key).
+
+    Every stored base model passed the full import check (validated training weights for a
+    warm-start pipeline), so each one is tagged as fine-tunable."""
     out = {k: v for k, v in row.items() if k != "object_key"}
     if out.get("created_at") is not None and hasattr(out["created_at"], "isoformat"):
         out["created_at"] = out["created_at"].isoformat()
-    return out
+    return tag(out, True)
+
+
+# --------------------------------------------------------------------------- fine-tune tags
+
+FINETUNE_YES = "Can be fine-tuned"
+FINETUNE_NO = "Fine-tune not supported"
+
+
+def tag(row: dict, ok: bool, reason: Optional[str] = None) -> dict:
+    """Set ``finetune_tag`` / ``finetune_reason`` on ``row`` (a NO always carries a reason)."""
+    row["finetune_tag"] = FINETUNE_YES if ok else FINETUNE_NO
+    row["finetune_reason"] = None if ok else (reason or "no validated training weights")
+    return row
 
 
 # --------------------------------------------------------------------------- import
@@ -490,9 +509,10 @@ def _local_manifest(raw: bytes) -> dict:
             f"a local package must be a {LOCAL_PIPELINE} model, not "
             f"{str(manifest['pipeline'])[:80]!r}"
         )
-    if manifest["model_arch"] != LOCAL_ARCH:
+    if manifest["model_arch"] not in LOCAL_ARCHS:
         raise NotImportable(
-            f"only {LOCAL_ARCH} local packages are supported, not {str(manifest['model_arch'])[:80]!r}"
+            f"local packages must declare model_arch {' or '.join(LOCAL_ARCHS)}, "
+            f"not {str(manifest['model_arch'])[:80]!r}"
         )
     files = manifest["files"]
     digest = files.get(LOCAL_WEIGHTS) if isinstance(files, dict) else None
@@ -593,15 +613,18 @@ def _safetensors_header(data: bytes) -> dict[str, dict]:
     return tensors
 
 
-def _check_resnet50(header: dict[str, dict], n_labels: int) -> None:
-    """Names, shapes and dtypes exactly as timm ``resnet50`` with ``n_labels`` head rows.
+def _check_timm_state(header: dict[str, dict], arch: str, n_labels: int) -> None:
+    """Names, shapes and dtypes exactly as timm ``arch`` with ``n_labels`` head rows.
 
     The reference network is built on the meta device: no memory for its weights."""
     import timm
     import torch
 
     with torch.device("meta"):
-        model = timm.create_model(LOCAL_ARCH, pretrained=False, num_classes=n_labels)
+        model = timm.create_model(arch, pretrained=False, num_classes=n_labels)
+    classifier = model.get_classifier()
+    head_name = next(n for n, m in model.named_modules() if m is classifier)
+    head_key = f"{head_name}.weight"
     ref = {
         k: (list(v.shape), _TORCH_TO_ST.get(str(v.dtype), str(v.dtype)))
         for k, v in model.state_dict().items()
@@ -614,12 +637,12 @@ def _check_resnet50(header: dict[str, dict], n_labels: int) -> None:
         if extra:
             parts.append(f"unexpected tensors {_few(n[:80] for n in extra)}")
         raise NotImportable(
-            f"the weights are not a timm {LOCAL_ARCH} state dict: " + "; ".join(parts)
+            f"the weights are not a timm {arch} state dict: " + "; ".join(parts)
         )
-    head = header["fc.weight"]["shape"]
-    if len(head) == 2 and head[1] == ref["fc.weight"][0][1] and head[0] != n_labels:
+    head = header[head_key]["shape"]
+    if len(head) == 2 and head[1] == ref[head_key][0][1] and head[0] != n_labels:
         raise NotImportable(
-            f"the classifier head (fc) has {head[0]} outputs but the manifest lists {n_labels} "
+            f"the classifier head ({head_name}) has {head[0]} outputs but the manifest lists {n_labels} "
             "labels; there must be one label per head row, in head order"
         )
     shapes = [
@@ -629,7 +652,7 @@ def _check_resnet50(header: dict[str, dict], n_labels: int) -> None:
     ]
     if shapes:
         raise NotImportable(
-            f"the weights do not have timm {LOCAL_ARCH} shapes: "
+            f"the weights do not have timm {arch} shapes: "
             + "; ".join(sorted(shapes)[:8])
         )
     dtypes = [
@@ -639,7 +662,7 @@ def _check_resnet50(header: dict[str, dict], n_labels: int) -> None:
     ]
     if dtypes:
         raise NotImportable(
-            f"the weights do not have timm {LOCAL_ARCH} dtypes: "
+            f"the weights do not have timm {arch} dtypes: "
             + "; ".join(sorted(dtypes)[:8])
         )
 
@@ -647,7 +670,8 @@ def _check_resnet50(header: dict[str, dict], n_labels: int) -> None:
 def load_local_package(data: bytes) -> tuple[dict, dict]:
     """``(facts, state)`` of a local package, or ``NotImportable`` for any defect.
 
-    ``state`` is the ``resnet50`` state dict (``torch`` tensors) loaded with safetensors only."""
+    ``state`` is the timm state dict of the declared architecture (``torch`` tensors), loaded
+    with safetensors only."""
     manifest_raw, weights = _local_members(data)
     manifest = _local_manifest(manifest_raw)
     expected = manifest["files"][LOCAL_WEIGHTS]
@@ -658,7 +682,7 @@ def load_local_package(data: bytes) -> tuple[dict, dict]:
             f"(file {actual}, manifest {expected})"
         )
     header = _safetensors_header(weights)
-    _check_resnet50(header, len(manifest["labels"]))
+    _check_timm_state(header, manifest["model_arch"], len(manifest["labels"]))
     import torch
     from safetensors.torch import load as st_load
 
@@ -679,7 +703,7 @@ def load_local_package(data: bytes) -> tuple[dict, dict]:
         raise NotImportable(f"the weights hold NaN or infinite values in {_few(bad)}")
     facts = {
         "pipeline": LOCAL_PIPELINE,
-        "model_arch": LOCAL_ARCH,
+        "model_arch": manifest["model_arch"],
         "labels": manifest["labels"],
         "sha256": _sha(data),
         "weights_sha256": actual,
@@ -852,3 +876,245 @@ def stage(settings, base_model_id: int, workdir: Path) -> dict:
         "path": dest,
         "sha256": digest,
     }
+
+
+# --------------------------------------------------------------------------- finished models as parents
+
+# A finished run of these pipelines carries its validated training weights (``weights.pt`` in the
+# bundle, sha256 in the manifest) and can start a new job with ``parent_model_id``. The stored
+# artifact is read in place: the parent is never copied, changed or re-imported.
+PARENT_PIPELINES = frozenset({"conventional_classifier", "dinov3_linear"})
+_PARENT_CACHE: dict[tuple, tuple[Optional[dict], Optional[str]]] = {}
+_PARENT_CACHE_MAX = 512
+
+
+def _read_parent_manifest(path: Path) -> tuple[Optional[dict], Optional[str]]:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = {i.filename: i for i in zf.infolist()}
+            m_info, w_info = infos.get("manifest.json"), infos.get("weights.pt")
+            if m_info is None:
+                return None, "the stored model has no manifest"
+            if w_info is None:
+                return None, (
+                    "the model was exported without training weights (weights.pt); "
+                    f"{RETRAIN_HINT}"
+                )
+            if m_info.file_size > MAX_MANIFEST_BYTES:
+                return None, "the stored model manifest is too large"
+            manifest = json.loads(zf.read(m_info))
+            digest = hashlib.sha256()
+            with zf.open(w_info) as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    digest.update(chunk)
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError) as exc:
+        return None, f"the stored model is not a readable bundle ({str(exc)[:200]})"
+    if not isinstance(manifest, dict):
+        return None, "the stored model manifest is not a JSON object"
+    files = manifest.get("files")
+    if not isinstance(files, dict) or files.get("weights.pt") != digest.hexdigest():
+        return (
+            None,
+            "the training weights do not match the sha256 in the model manifest",
+        )
+    return manifest, None
+
+
+def _parent_manifest(path: Path) -> tuple[Optional[dict], Optional[str]]:
+    """``(manifest, None)`` for validated training weights, else ``(None, reason)``.
+
+    Cached by path, size and mtime: listing models hashes each stored ``weights.pt`` once."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None, "the stored model file is missing"
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    hit = _PARENT_CACHE.get(key)
+    if hit is None:
+        hit = _read_parent_manifest(path)
+        if len(_PARENT_CACHE) >= _PARENT_CACHE_MAX:
+            _PARENT_CACHE.clear()
+        _PARENT_CACHE[key] = hit
+    return hit
+
+
+def _parent_state(objects_dir, row: dict) -> tuple[Optional[dict], Optional[str]]:
+    """The manifest of a finished model that can be a parent, else ``(None, reason)``."""
+    pipeline = row.get("pipeline")
+    if pipeline not in PARENT_PIPELINES:
+        if pipeline == "yolo_detector":
+            return None, (
+                "a YOLO run is fine-tuned through Sparrow Studio: push it to a Studio project "
+                "and import it as a base model"
+            )
+        return None, f"{pipeline} models cannot start a new fine-tune job"
+    key = row.get("object_key")
+    if not key:
+        return None, "the stored model file is missing"
+    try:
+        path = LocalObjectStore(objects_dir).path(key)
+    except ValueError:
+        return None, "the stored model file is missing"
+    manifest, reason = _parent_manifest(path)
+    if manifest is not None and manifest.get("pipeline") != pipeline:
+        return None, "the stored model manifest names another pipeline"
+    return manifest, reason
+
+
+def tag_model(objects_dir, row: dict) -> dict:
+    """Tag a ``model_versions`` row (needs ``pipeline`` and ``object_key``) in place."""
+    manifest, reason = _parent_state(objects_dir, row)
+    return tag(row, manifest is not None, reason)
+
+
+def _model_row(database_url: str, model_id: int) -> Optional[dict]:
+    with connect(database_url) as conn:
+        return conn.execute(
+            "SELECT id, pipeline, object_key, sha256 FROM model_versions WHERE id = %s",
+            (model_id,),
+        ).fetchone()
+
+
+def _encoder_mismatch(settings, model_id: int, manifest: dict) -> Optional[str]:
+    """Why a DINOv3 parent's head cannot be reused with this service's encoder (or ``None``).
+
+    An unset or unreadable encoder spec is not judged here; the worker checks it again."""
+    from .embedders import embedder_identity
+
+    current = embedder_identity(getattr(settings, "embedder", "") or "")
+    trained = manifest.get("embedder") or {}
+    if current is None or current == trained.get("model_hash"):
+        return None
+    return (
+        f"model {model_id} was trained on encoder {trained.get('id')!r}, but this service "
+        "embeds with a different encoder; a different encoder means its head cannot be reused"
+    )
+
+
+def check_parent_model(settings, model_id: int, pipeline: str, params: dict) -> dict:
+    """Raise ``ValueError`` unless finished model ``model_id`` can be the parent of the job."""
+    row = _model_row(settings.database_url, model_id)
+    if row is None:
+        raise ValueError(f"model {model_id} not found")
+    if row["pipeline"] != pipeline:
+        raise ValueError(
+            f"model {model_id} is a {row['pipeline']} model, it cannot start a {pipeline} job"
+        )
+    manifest, reason = _parent_state(settings.objects_dir, row)
+    if manifest is None:
+        raise ValueError(f"model {model_id} cannot be fine-tuned: {reason}")
+    if pipeline == "conventional_classifier":
+        arch, model = manifest.get("model_arch"), params.get("model")
+        if model is not None and arch != model:
+            raise ValueError(
+                f"model {model_id} is a {arch} network but the job trains {model}; "
+                f"pick model={arch!r} or another parent model"
+            )
+    else:
+        mismatch = _encoder_mismatch(settings, model_id, manifest)
+        if mismatch:
+            raise ValueError(mismatch)
+    return row
+
+
+def stage_parent(settings, model_id: int, workdir: Path) -> dict:
+    """``JobContext.base_model`` for a parent: its stored bundle, read in place after a sha check."""
+    row = _model_row(settings.database_url, model_id)
+    if row is None:
+        raise ValueError(f"model {model_id} not found")
+    path = LocalObjectStore(settings.objects_dir).path(row["object_key"])
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != row["sha256"]:
+        raise ValueError(
+            f"model {model_id} artifact is corrupt (sha256 {digest.hexdigest()}, "
+            f"expected {row['sha256']})"
+        )
+    manifest, reason = _parent_state(settings.objects_dir, row)
+    if manifest is None:
+        raise ValueError(f"model {model_id} cannot be fine-tuned: {reason}")
+    return {
+        "id": row["id"],
+        "origin": "parent",
+        "kind": "parent",
+        "model_arch": manifest.get("model_arch"),
+        "labels": list(manifest.get("labels") or []),
+        "path": path,
+        "sha256": row["sha256"],
+    }
+
+
+def _snapshot_labels(database_url: str, snapshot_id: int) -> Optional[list[str]]:
+    with connect(database_url) as conn:
+        if (
+            conn.execute(
+                "SELECT 1 FROM snapshots WHERE id = %s", (snapshot_id,)
+            ).fetchone()
+            is None
+        ):
+            return None
+        rows = conn.execute(
+            "SELECT DISTINCT a->>'label' AS label FROM snapshot_items si, "
+            "jsonb_array_elements(si.annotations) a WHERE si.snapshot_id = %s",
+            (snapshot_id,),
+        ).fetchall()
+    return sorted({r["label"] for r in rows if r["label"] is not None})
+
+
+def reuse_preview(settings, model_id: int, snapshot_id: int) -> Optional[dict]:
+    """What a new job on ``snapshot_id`` would reuse from finished model ``model_id``.
+
+    ``None`` for an unknown model; ``LookupError`` for an unknown snapshot."""
+    row = _model_row(settings.database_url, model_id)
+    if row is None:
+        return None
+    labels = _snapshot_labels(settings.database_url, snapshot_id)
+    if labels is None:
+        raise LookupError(f"snapshot {snapshot_id} not found")
+
+    def out(usable: bool, backbone: bool, head: bool, reason: str) -> dict:
+        return {
+            "usable": usable,
+            "transfers": {"backbone": backbone, "head": head},
+            "reason": reason,
+        }
+
+    manifest, reason = _parent_state(settings.objects_dir, row)
+    if manifest is None:
+        return out(False, False, False, reason or "no validated training weights")
+    parent_labels = list(manifest.get("labels") or [])
+    if row["pipeline"] == "conventional_classifier":
+        if parent_labels == labels:
+            return out(
+                True,
+                True,
+                True,
+                "same labels: the backbone and the classifier head are both reused",
+            )
+        return out(
+            True,
+            True,
+            False,
+            f"the labels differ (model: {_few(parent_labels)}; snapshot: {_few(labels)}): "
+            "the backbone is reused and the classifier head is re-initialised",
+        )
+    mismatch = _encoder_mismatch(settings, model_id, manifest)
+    if mismatch:
+        return out(False, False, False, mismatch)
+    shared = set(parent_labels) & set(labels)
+    if not shared:
+        return out(
+            True,
+            False,
+            False,
+            "same encoder, but no labels in common: the linear head is re-initialised",
+        )
+    return out(
+        True,
+        False,
+        True,
+        f"same encoder: the linear head is reused for {len(shared)} shared label(s); "
+        "the encoder itself is frozen and not trained",
+    )

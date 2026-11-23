@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from ..base_models import check_base_model
+from ..base_models import check_base_model, check_parent_model, reuse_preview, tag_model
 from ..db import connect
 from ..jobs import TERMINAL_STATES, AlreadyRetried, JobQueue
 from ..jsonsafe import find_non_finite, sanitise_non_finite
@@ -136,6 +136,22 @@ def submit_job(body: JobIn, request: Request):
                 params["base_model_id"],
                 trainer.id,
                 params.get("model"),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, f"invalid params: {exc}") from exc
+    if params.get("parent_model_id") is not None:
+        if not trainer.supports_base_model:
+            raise HTTPException(
+                422,
+                f"invalid params: parent_model_id is not supported by {trainer.id} "
+                "(this pipeline cannot start from a finished model)",
+            )
+        try:
+            check_parent_model(
+                request.app.state.settings,
+                params["parent_model_id"],
+                trainer.id,
+                params,
             )
         except ValueError as exc:
             raise HTTPException(422, f"invalid params: {exc}") from exc
@@ -364,14 +380,17 @@ def list_models(
     columns = ", ".join(f"j.{c.strip()}" for c in _MODEL_COLUMNS.split(","))
     with connect(request.app.state.settings.database_url) as conn:
         rows = conn.execute(
-            f"SELECT {columns}, d.id AS dataset_id, d.name AS dataset_name, d.workspace_id"
+            f"SELECT {columns}, j.object_key, d.id AS dataset_id, d.name AS dataset_name, d.workspace_id"
             f" FROM model_versions j {_DATASET_JOIN}"
             " WHERE (%s::bigint IS NULL OR j.job_id = %s)"
             " AND (%s::bigint IS NULL OR d.workspace_id = %s) ORDER BY j.id",
             (job_id, job_id, workspace_id, workspace_id),
         ).fetchall()
         active = _active_deployments(conn)
+    objects_dir = request.app.state.settings.objects_dir
     for row in rows:
+        tag_model(objects_dir, row)
+        row.pop("object_key", None)
         row["active_deployments"] = active.get(row["id"], [])
         row["stock_comparison"] = stock_comparison(row["metrics"], row["metadata"])
         row["reference_comparison"] = reference_comparison(row["metrics"])
@@ -408,7 +427,9 @@ def _model_or_404(request: Request, model_id: int, columns: str) -> dict:
 
 @router.get("/models/{model_id}")
 def get_model(model_id: int, request: Request):
-    row = _model_or_404(request, model_id, _MODEL_COLUMNS)
+    row = _model_or_404(request, model_id, f"{_MODEL_COLUMNS}, object_key")
+    tag_model(request.app.state.settings.objects_dir, row)
+    row.pop("object_key", None)
     with connect(request.app.state.settings.database_url) as conn:
         row["active_deployments"] = _active_deployments(conn, model_id).get(
             model_id, []
@@ -416,6 +437,18 @@ def get_model(model_id: int, request: Request):
     row["stock_comparison"] = stock_comparison(row["metrics"], row["metadata"])
     row["reference_comparison"] = reference_comparison(row["metrics"])
     return row
+
+
+@router.get("/models/{model_id}/reuse")
+def preview_reuse(model_id: int, snapshot_id: int, request: Request):
+    """What a job on ``snapshot_id`` with ``parent_model_id=model_id`` would reuse."""
+    try:
+        preview = reuse_preview(request.app.state.settings, model_id, snapshot_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if preview is None:
+        raise HTTPException(404, f"model {model_id} not found")
+    return preview
 
 
 class ModelPatch(BaseModel):

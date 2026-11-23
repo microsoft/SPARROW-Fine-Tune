@@ -1,14 +1,16 @@
-"""Local base models: ``POST /base-models/local`` imports a ResNet-50 training package.
+"""Local base models: ``POST /base-models/local`` imports a timm training package.
 
 The package is the ZIP that ``sparrow-uploader prepare-finetune`` writes; ``base_models``
 validates it in full (stored members only, manifest, sha256, safetensors framing, exact timm
-``resnet50`` tensors, bounded labels) before anything is stored. No Sparrow Studio is involved,
+``resnet50`` or ``efficientnet_b0`` tensors for the declared ``model_arch``, bounded labels)
+before anything is stored. No Sparrow Studio is involved,
 so this works on a standalone service. ``GET /base-models`` lists local and Studio rows alike.
 """
 
 from __future__ import annotations
 
 import hashlib
+import threading
 from typing import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
@@ -27,6 +29,9 @@ FIELD = "file"
 # Multipart framing (boundaries, part headers) around the package itself.
 _ENVELOPE_BYTES = 64 << 10
 MAX_BODY_BYTES = base_models.MAX_LOCAL_PACKAGE_BYTES + _ENVELOPE_BYTES
+# Each upload buffers up to MAX_LOCAL_PACKAGE_BYTES in memory.
+MAX_CONCURRENT_UPLOADS = 2
+_UPLOADS = threading.BoundedSemaphore(MAX_CONCURRENT_UPLOADS)
 
 
 async def _capped(request: Request, cap: int) -> AsyncIterator[bytes]:
@@ -116,7 +121,16 @@ def _import(request: Request, data: bytes) -> tuple[dict, bool]:
 
 @router.post("/base-models/local")
 async def upload_local_base_model(request: Request):
-    """Import a ``sparrow-finetune/base-v1`` package; 201 when new, 200 for the same bytes again."""
-    data = await _read_package(request)
-    row, created = await run_in_threadpool(_import, request, data)
+    """Import a ``sparrow-finetune/base-v1`` package; 201 when new, 200 for the same bytes again.
+
+    At most ``MAX_CONCURRENT_UPLOADS`` packages are buffered at once; more answer 429."""
+    if not _UPLOADS.acquire(blocking=False):
+        raise HTTPException(
+            429, "too many base-model uploads in progress; retry when one finishes"
+        )
+    try:
+        data = await _read_package(request)
+        row, created = await run_in_threadpool(_import, request, data)
+    finally:
+        _UPLOADS.release()
     return JSONResponse(jsonable_encoder(row), status_code=201 if created else 200)

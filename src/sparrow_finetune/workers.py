@@ -289,6 +289,10 @@ def _run_job(
                 ctx.base_model = base_models.stage(
                     settings, ctx.params["base_model_id"], ctx.workdir
                 )
+            elif ctx.params.get("parent_model_id") is not None:
+                ctx.base_model = base_models.stage_parent(
+                    settings, ctx.params["parent_model_id"], ctx.workdir
+                )
             trainer.prepare(ctx)
 
             stage("train")

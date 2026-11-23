@@ -92,32 +92,41 @@ and `SPARROW_FT_WEIGHTS_DIR=/weights` in `.env.service`. Then start with
 
 Datasets and snapshots can be exported as VOC, COCO or Camtrap DP.
 
-### Starting from your own ResNet-50 (no Studio needed)
+### Starting from your own image classifier (no Studio needed)
 
-The image classifier pipeline (`conventional_classifier`) can start from ResNet-50 weights
-you trained elsewhere. Build a package with Sparrow Uploader:
+The image classifier pipeline (`conventional_classifier`) uses timm (PyTorch Image Models), a
+library that provides many image-classifier architectures under short names such as
+`resnet50` or `efficientnet_b0`. Without a base model the job trains `resnet50`. It can instead
+start from classifier weights you trained elsewhere. The packages validated for this release
+name `resnet50` or `efficientnet_b0`. A package for another timm architecture is checked the
+same way, but an architecture name alone is not a promise that it imports or trains.
+
+Build a package with Sparrow Uploader:
 
 ```bash
-sparrow-uploader prepare-finetune --weights resnet50.safetensors --labels labels.txt --output package.zip
+sparrow-uploader prepare-finetune --weights classifier.safetensors --labels labels.txt --output package.zip
 ```
 
 Then, with the image classifier pipeline selected, choose the `.zip` under **Base model →
-Your own ResNet-50**, and click **Upload and use**. The package then appears in the picker
-below it for later jobs. When the job starts it trains `resnet50` from those weights. If the
-package's labels match the snapshot's labels in the same order, the classifier head is reused;
-otherwise the head is re-initialised and only the backbone is loaded.
+Your own image classifier (local package)**, and click **Upload and use**. The package then
+appears in the picker below it for later jobs. The job trains the architecture the package
+names (for example `efficientnet_b0`); a different `model` in the job parameters is refused. If
+the package's labels match the snapshot's labels in the same order, the classifier head is
+reused; otherwise the head is re-initialised and only the backbone is loaded.
 
 The service accepts only this package format (`sparrow-finetune/base-v1`) and checks it in
 full before storing anything:
 
 - The ZIP has exactly two uncompressed members: `manifest.json` and `weights.safetensors`.
 - `manifest.json` gives `schema`, `pipeline: conventional_classifier`,
-  `model_arch: resnet50`, `labels`, and `files["weights.safetensors"]` (its sha256).
+  `model_arch` (for example `resnet50` or `efficientnet_b0`), `labels`, and
+  `files["weights.safetensors"]` (its sha256).
 - Labels: 1 to 100,000 distinct, non-blank names of at most 256 characters each. They have
   no surrounding whitespace and no control characters, and their count must match the
   classifier head.
 - `weights.safetensors` (at most 1 GiB) must hold exactly the tensor names, shapes and dtypes
-  of timm `resnet50`, with finite values only.
+  of the timm model that `model_arch` names, with finite values only. The architecture is
+  read from the manifest, never guessed from the tensors.
 
 Pickle files (`.pt`, `.pth`) and any other code are rejected, and nothing in the package
 is executed. Uploading the same bytes again returns the existing base model. A rejected package
@@ -129,9 +138,76 @@ To upload without the web app:
 curl -H "Authorization: Bearer $TOKEN" -F file=@package.zip http://host:8000/v1/base-models/local
 ```
 
-Then start the job with `{"params": {"base_model_id": <id>, "model": "resnet50"}}`.
-Local base models are stored privately in this service; they are not linked to any Studio
-project.
+Then start the job with `{"params": {"base_model_id": <id>}}`; the job uses the package's
+architecture. Local upload works with or without Studio.
+
+**Privacy on a shared install.** Uploaded packages, datasets and trained models are stored in
+this service only. They are not linked to any Studio project, and nothing is uploaded to the
+model zoo. Everyone who can sign in to the same service can see the workspaces they share.
+
+### Retraining a finished model on new data
+
+A finished image classifier (`conventional_classifier`) or DINOv3 (`dinov3_linear`) model can
+be the starting point of a new job on a new snapshot. The finished model is not changed; the
+new job registers a new version that records it as its parent.
+
+1. On **Models**, open the finished model and click **Use as base for new training**, or, on
+   **Data**, choose it under **Base model → Retrain a finished model on this snapshot**.
+2. Create the new snapshot. The panel then previews what carries over to that snapshot:
+   - same classes in the same order: the feature extractor (backbone) and the class layer
+     (head) are both reused;
+   - different classes: only the backbone is reused, and the class layer is trained from
+     scratch, so it needs about as much labelled data as a new class layer.
+3. Start training. The job keeps the parent's architecture (or DINOv3 encoder). A job that
+   asks for a different architecture or encoder is refused with HTTP 422 and the reason; the
+   preview shows the same limitation before you start.
+
+API: `GET /v1/models/{id}/reuse?snapshot_id=<snapshot>` returns
+`{"usable", "transfers": {"backbone", "head"}, "reason"}`; start the job with
+`{"params": {"parent_model_id": <id>}}`.
+
+### Preparing crops before a snapshot
+
+Classifier pipelines that train on animal crops need a box on each labelled image. When a
+classification dataset mixes images that already have a reviewed box, crops imported from
+Studio, and raw images that only have a label, the **Crops for the classifier** panel above
+**Create immutable snapshot** counts each group and lists the raw images that still need a box.
+Choose one of:
+
+- **Pre-draw boxes on these images only**: runs the installed detector you pick (for example
+  MegaDetector) on the listed images only. Reviewed boxes and Studio crops are not touched.
+  Images where the detector finds nothing stay on the list; they are never dropped silently.
+  Review the pre-drawn boxes before the snapshot. If no detector is installed, this button is
+  disabled.
+- **Show them so I can draw boxes**: filters the image list to these images. **Show all
+  images** clears the filter.
+- **Leave them out of the snapshot**: after a confirmation, creates the snapshot without
+  them. They stay in the dataset with their labels.
+
+A crop snapshot with images that still need a box is refused (HTTP 409, the images listed)
+until one of these is chosen. Whole-image datasets need no box and no choice. API:
+`GET /v1/datasets/{id}/crop-prep` returns `{"mode", "boxed", "studio_crops", "needs_boxes"}`;
+`POST /v1/datasets/{id}/assist` with `{"images": [...]}` runs only on those images;
+`POST /v1/datasets/{id}/snapshots` with `{"missing_boxes": "exclude"}` leaves them out.
+
+### Model catalogue
+
+The **Models** page lists, below your trained models, the models you can get. Every row shows,
+before anything is downloaded, one of two tags:
+
+- **Can be fine-tuned**: the model has validated training weights for a pipeline here.
+- **Fine-tune not supported**: the model can run but cannot be a training starting point; the
+  row gives the reason (for example, it ships runtime weights only).
+
+Without Studio (standalone), the list is the local Sparrow Engine model zoo. **Download**
+installs exactly the one model you chose, after a confirmation, into the Engine model folder
+on this server, which every user of the service shares. Models that are only available from
+their publisher show a link to the source instead. If the online catalogue cannot be reached,
+installed models are still listed. Nothing is downloaded by listing the catalogue, and there
+is no bulk download.
+
+Connected to Studio, the list shows the Studio project's models; install and manage them in
+Studio. Downloads from this page are refused in that mode.
 
 ## 5. Sparrow Studio integration (optional)
 
@@ -157,11 +233,12 @@ All routes are under `/v1`. The OpenAPI schema is at `/openapi.json`, with inter
 |---|---|
 | Workspaces, datasets | `/workspaces`, `/workspaces/{id}/datasets`, `/datasets/{id}`, `/datasets/{id}/images`, `/datasets/{id}/items` |
 | Import / export | `POST /datasets/{id}/import/{voc,coco,camtrapdp}`, `GET /datasets/{id}/export/{voc,coco,camtrapdp}` |
-| Assisted labelling | `GET /assist/models`, `POST /datasets/{id}/assist` |
-| Snapshots | `POST /datasets/{id}/snapshots`, `/snapshots/{id}` |
+| Assisted labelling | `GET /assist/models`, `POST /datasets/{id}/assist` (optional `images`: only those) |
+| Snapshots | `GET /datasets/{id}/crop-prep`, `POST /datasets/{id}/snapshots` (optional `{"missing_boxes": "exclude"}`), `/snapshots/{id}` |
 | Pipelines, jobs | `GET /pipelines`, `POST /jobs`, `/jobs/{id}`, `/jobs/{id}/events`, `/jobs/{id}/stream` (server-sent events), `cancel`, `retry` |
-| Models | `/models`, `/models/{id}`, `/models/{id}/artifact`, `POST /models/{id}/activate`, `/deployments`, `/stock-models` |
-| Base models (warm start) | `GET /base-models`, `POST /base-models/local` (multipart field `file`: a ResNet-50 package, section 4), `POST /connectors/studio/models/import` |
+| Models | `/models`, `/models/{id}`, `/models/{id}/artifact`, `GET /models/{id}/reuse?snapshot_id=`, `POST /models/{id}/activate`, `/deployments`, `/stock-models` |
+| Catalogue | `GET /catalog`, `POST /catalog/models/{id}/download` (one model) |
+| Base models (warm start) | `GET /base-models`, `POST /base-models/local` (multipart field `file`: a classifier package, section 4), `POST /connectors/studio/models/import` |
 
 ## 7. Command line
 
