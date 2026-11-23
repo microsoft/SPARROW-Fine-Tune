@@ -109,6 +109,8 @@ def test_crop_snapshot_keeps_boxes_and_studio_crops(client, settings):
             (ds,),
         )
     r = client.post(f"/v1/datasets/{ds}/snapshots")
+    assert r.status_code == 409, r.text
+    r = client.post(f"/v1/datasets/{ds}/snapshots", json={"missing_boxes": "exclude"})
     assert r.status_code == 201, r.text
     snap = r.json()
     assert snap["left_out"] == 1
