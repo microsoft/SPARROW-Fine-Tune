@@ -466,6 +466,7 @@ def scenario_detection_chain(c: Ctx) -> None:
         "yolo11n auto batch": {
             "model": "yolo11n.pt",
             "epochs": 40,
+            "patience": 40,
             "imgsz": 320,
             "batch": "auto",
         },
@@ -634,6 +635,7 @@ def scenario_detection_chain(c: Ctx) -> None:
     # FT-35: MegaDetector assist on a classification dataset; boxes take the image's label.
     # Assist replaces an item's annotations, so the expected label comes from before the call.
     cls_ds = c.cls_ds
+    api.ok("PATCH", f"/datasets/{cls_ds}", {"whole_image": False})
     cls_before = boxes_of(api, cls_ds)
     st, b = api.call("POST", f"/datasets/{cls_ds}/assist", {"model_id": "megadetector"})
     cls_boxes = boxes_of(api, cls_ds)
@@ -738,7 +740,7 @@ def scenario_classifiers(c: Ctx) -> None:
     ds = api.ok(
         "POST",
         f"/workspaces/{c.ws}/datasets",
-        {"name": "cls crops", "task": "classification"},
+        {"name": "cls crops", "task": "classification", "whole_image": True},
     )["id"]
     c.cls_ds = ds
     rng = random.Random(31)
@@ -1015,8 +1017,9 @@ def scenario_ui(c: Ctx) -> None:
             len(page.locator("#pipeline-guide").inner_text()) > 80,
             "",
         )
+        page.locator("#training-settings > summary").click()
         check(
-            "UI: batch automatic option present",
+            "UI: batch automatic option present in training settings",
             page.locator("#batch-auto").is_visible(),
             "",
         )
@@ -1135,6 +1138,7 @@ def main() -> int:
                 f"SPARROW_FT_API_TOKENS={api_token}",
                 "SPARROW_FT_EMBEDDER=onnx:/assets/dinov3_vits16.onnx",
                 "SPARROW_FT_WEIGHTS_DIR=/weights",
+                "SPARROW_FT_GPU_PIPELINES=yolo_detector",
             ]
         )
         + "\n"

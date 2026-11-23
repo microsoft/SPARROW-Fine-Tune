@@ -677,7 +677,7 @@ def extend_override(
     }
     for name, (url, tok, port) in variants.items():
         svc[name] = {
-            "image": "sparrow-finetune:latest",
+            "image": "sparrow-finetune:${SPARROW_FT_IMAGE_TAG:-latest}",
             "command": ["api", "--host", "0.0.0.0", "--port", "8000"],
             "environment": env(url, tok),
             "volumes": ["ft-data:/data", f"{assets}:/assets:ro"],
@@ -699,7 +699,7 @@ def scenario_classification_sync(c: Ctx) -> None:
     ds = api.ok(
         "POST",
         f"/workspaces/{ws}/datasets",
-        {"name": "A crops", "task": "classification"},
+        {"name": "A crops", "task": "classification", "whole_image": True},
     )["id"]
     c.ds_a = ds
 

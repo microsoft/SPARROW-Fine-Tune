@@ -87,9 +87,9 @@ def pick_crops(amazon: Path, per_class: int) -> list[tuple[str, str, str]]:
     return out
 
 
-def write_override(path: Path, weights: Path, assets: Path, yolo_cwd: Path) -> None:
+def write_override(path: Path, weights: Path, assets: Path, yolo_cwd: Path, image: str) -> None:
     worker = {
-        "image": "sparrow-finetune:cpu",
+        "image": image,
         "environment": {"HF_HUB_OFFLINE": "1"},
         "volumes": [
             "ft-data:/data",
@@ -133,6 +133,7 @@ def main() -> int:
     ap.add_argument("--stock", type=Path, required=True)
     ap.add_argument("--timm-weights", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--image-tag", default="cpu", help="tag of the CPU-only image under test")
     ap.add_argument("--per-class", type=int, default=12)
     ap.add_argument("--train-timeout", type=int, default=3600)
     ap.add_argument("--keep", action="store_true", help="leave the stack running")
@@ -155,7 +156,7 @@ def main() -> int:
     token = secrets.token_urlsafe(24)
     env = {
         "POSTGRES_PASSWORD": secrets.token_urlsafe(16),
-        "SPARROW_FT_IMAGE_TAG": "cpu",
+        "SPARROW_FT_IMAGE_TAG": args.image_tag,
         "TORCH_VARIANT": "cpu",
         "SPARROW_FT_PORT": str(port),
         "SPARROW_FT_API_TOKENS": token,
@@ -164,7 +165,8 @@ def main() -> int:
         "SPARROW_FT_WEIGHTS_DIR": "/weights",
     }
     override = work / "override.json"
-    write_override(override, weights.resolve(), args.assets.resolve(), yolo_cwd)
+    image = f"sparrow-finetune:{args.image_tag}"
+    write_override(override, weights.resolve(), args.assets.resolve(), yolo_cwd, image)
     files = [REPO / "compose.service.yml", override]
     info: dict = {"project": project}
     try:
@@ -181,9 +183,9 @@ def main() -> int:
         ps = compose(project, files, env, "ps", "--format", "{{.Service}} {{.Image}}")
         services = dict(line.split(" ", 1) for line in ps.stdout.split("\n") if line)
         check(
-            "only worker-cpu runs, on sparrow-finetune:cpu",
+            f"only worker-cpu runs, on {image}",
             "worker-gpu" not in services
-            and services.get("worker-cpu") == "sparrow-finetune:cpu",
+            and services.get("worker-cpu") == image,
             json.dumps(services),
         )
         probe = compose(
@@ -215,7 +217,7 @@ def main() -> int:
         cls = api.ok(
             "POST",
             f"/workspaces/{ws}/datasets",
-            {"name": "Amazon crops", "task": "classification"},
+            {"name": "Amazon crops", "task": "classification", "whole_image": True},
         )["id"]
         crops = pick_crops(args.amazon, args.per_class)
         items = []
