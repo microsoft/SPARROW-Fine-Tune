@@ -2102,7 +2102,16 @@ function renderReusePreview() {
   const nodes = [line(p.usable
     ? `${modelTitle(parent)} can be the starting point for snapshot ${state.snapshot.id}.`
     : `${modelTitle(parent)} cannot be retrained on snapshot ${state.snapshot.id}.`, "reuse-verdict")];
-  if (p.usable) {
+  if (p.usable && p.encoder === "same_frozen") {
+    const shared = Number(p.shared_labels || 0);
+    const total = Number(p.snapshot_labels || 0);
+    nodes.push(el("ul", {},
+      el("li", { text: "DINOv3 encoder: the same frozen encoder; it is never trained, so nothing is lost or changed" }),
+      el("li", { text: shared
+        ? `Linear head: starts from the finished model's weights for ${shared} of ${total} ${total === 1 ? "class" : "classes"}${total > shared ? `; the other ${total - shared} start from zero` : ""}`
+        : "Linear head: no classes in common, so it starts from zero" }),
+    ));
+  } else if (p.usable) {
     nodes.push(el("ul", {},
       el("li", { text: `Feature extractor (backbone): ${t.backbone ? "carried over" : "not carried over"}` }),
       el("li", { text: `Class layer (head): ${t.head ? "carried over, same classes" : "trained from scratch"}` }),
@@ -2313,12 +2322,26 @@ function renderSnapshot() {
   if (state.parentModel) previewReuse().catch(() => {});
 }
 
-async function createSnapshot(missingBoxes) {
+// missingBoxes="exclude" sends excludeImages, the exact list the user saw, so the server refuses
+// (409) instead of leaving out an image that started needing a box after the user agreed.
+async function createSnapshot(missingBoxes, excludeImages) {
   if (!state.datasetId) throw new Error("Create or select a dataset first.");
   let snap;
+  let body;
+  if (missingBoxes) {
+    body = { missing_boxes: missingBoxes };
+    if (missingBoxes === "exclude") {
+      body.exclude_images = excludeImages || ((state.cropPrep && state.cropPrep.needs_boxes) || []);
+    }
+  }
   try {
-    snap = await api("POST", `/v1/datasets/${state.datasetId}/snapshots`, missingBoxes ? { missing_boxes: missingBoxes } : undefined);
+    snap = await api("POST", `/v1/datasets/${state.datasetId}/snapshots`, body);
   } catch (err) {
+    if (err instanceof ApiError && err.status === 409 && missingBoxes === "exclude") {
+      await loadCropPrep();
+      renderCropPrep();
+      throw new Error("More images need a box than the ones you chose to leave out, so no snapshot was created. Review the updated list and choose again.");
+    }
     if (!(err instanceof ApiError) || err.status !== 409 || missingBoxes) throw err;
     await loadCropPrep();
     renderCropPrep();
@@ -2328,7 +2351,7 @@ async function createSnapshot(missingBoxes) {
     if (!needs.length) throw err;
     $("#crop-prep").scrollIntoView({ block: "center" });
     const options = [];
-    if (cropPrepDetector()) options.push({ value: "assist", label: "Pre-draw boxes with a detector", detail: "Runs the installed detector on these images only. Reviewed boxes and Studio crops are not touched." });
+    if (cropPrepDetector()) options.push({ value: "assist", label: "Pre-draw boxes with a detector", detail: "Runs the installed detector on these images only. Reviewed boxes, Studio crops and images a reviewer confirmed are not touched." });
     options.push(
       { value: "draw", label: "Show them so I can draw boxes", detail: "Filters the image list to these images." },
       { value: "exclude", label: "Leave them out of this snapshot", detail: "They stay in the dataset and can be boxed later." },
@@ -2340,7 +2363,7 @@ async function createSnapshot(missingBoxes) {
     );
     if (pick === "assist") await cropPrepAssist();
     else if (pick === "draw") await cropPrepDraw();
-    else if (pick === "exclude") await createSnapshot("exclude");
+    else if (pick === "exclude") await createSnapshot("exclude", needs);
     return;
   }
   toast(missingBoxes === "exclude"
@@ -2387,7 +2410,7 @@ function renderCropPrep() {
     + (needs.length ? "" : " All labelled images are ready for a snapshot.");
   $("#crop-prep-needs").hidden = !needs.length;
   if (!needs.length) return;
-  $("#crop-prep-needs-text").textContent = `These raw images have a label but no box. Choose how to handle ${needs.length === 1 ? "it" : "them"} before the snapshot; none is dropped silently. Images where the detector finds nothing stay on this list.`;
+  $("#crop-prep-needs-text").textContent = `These raw images have a label but no box. Choose how to handle ${needs.length === 1 ? "it" : "them"} before the snapshot; none is dropped silently. Images where the detector finds nothing stay on this list, and so do images a reviewer confirmed: the detector never changes a confirmed image.`;
   const shown = needs.slice(0, 20);
   $("#crop-prep-list").replaceChildren(
     ...shown.map((n) => el("li", { text: n })),
@@ -2417,21 +2440,38 @@ async function cropPrepAssist() {
   if (!needs.length) return;
   const status = $("#crop-prep-status");
   let written = 0;
+  const confirmed = [];
+  const empty = [];
+  const other = [];
   await withBusy(`Pre-drawing boxes on ${plural(needs.length, "image")}…`, $("#crop-prep-assist"), async () => {
     for (let i = 0; i < needs.length; i += ASSIST_MAX_ITEMS) {
       const images = needs.slice(i, i + ASSIST_MAX_ITEMS);
       const res = await api("POST", `/v1/datasets/${state.datasetId}/assist`, {
         model_id: modelId, images, sources: ["upload", "studio"], conf: assistConf(), overwrite: false,
+        needs_boxes_only: true,
       });
       written += Number((res && res.items_written) || 0);
+      for (const s of (res && res.skipped) || []) {
+        const reason = String((s && s.reason) || "");
+        if (/confirmed/i.test(reason)) confirmed.push(s.image);
+        else if (/^no detections/i.test(reason)) empty.push(s.image);
+        else other.push(s.image);
+      }
     }
   });
   await loadDataset();
   const left = ((state.cropPrep && state.cropPrep.needs_boxes) || []).length;
+  const them = (n) => (n === 1 ? "it" : "them");
+  const parts = [`Boxes pre-drawn on ${plural(written, "image")}.`];
+  // Confirmed images are protected: the detector never replaces a reviewer's decision, so they
+  // are skipped, not "nothing found".
+  if (confirmed.length) parts.push(`${plural(confirmed.length, "image")} confirmed by a reviewer ${confirmed.length === 1 ? "was" : "were"} skipped and not changed (${confirmed.slice(0, 3).join(", ")}${confirmed.length > 3 ? ", …" : ""}); draw a box yourself or leave ${them(confirmed.length)} out.`);
+  if (empty.length) parts.push(`The detector found nothing on ${plural(empty.length, "image")}; draw a box or leave ${them(empty.length)} out.`);
+  if (other.length) parts.push(`${plural(other.length, "image")} ${other.length === 1 ? "was" : "were"} skipped for another reason (for example changed while the detector ran).`);
+  if (left) parts.push(`${plural(left, "image")} still need a box.`);
+  parts.push("Review the pre-drawn boxes before the snapshot.");
   status.dataset.kind = "result";
-  status.textContent = left
-    ? `Boxes pre-drawn on ${plural(written, "image")}. The detector found nothing on ${plural(left, "image")}; draw a box or leave ${left === 1 ? "it" : "them"} out. Review the pre-drawn boxes before the snapshot.`
-    : `Boxes pre-drawn on ${plural(written, "image")}. Review them before the snapshot.`;
+  status.textContent = parts.join(" ");
   toast(`Pre-drawn boxes on ${plural(written, "image")}`);
 }
 
@@ -2457,7 +2497,7 @@ async function cropPrepExclude() {
     `${plural(needs.length, "image")} without a box will not be in this snapshot. They stay in the dataset, and their labels are kept.`,
     [{ value: "exclude", label: "Create the snapshot without them" }],
   );
-  if (ok === "exclude") await createSnapshot("exclude");
+  if (ok === "exclude") await createSnapshot("exclude", needs);
 }
 
 // Shows a blocking "working" panel while fn runs, and disables the button that started it.

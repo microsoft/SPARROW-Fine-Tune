@@ -123,6 +123,10 @@ def submit_job(body: JobIn, request: Request):
         raise HTTPException(
             422, f"invalid params: {bad} is not a finite number (NaN/Infinity)"
         )
+    # An omitted ``model`` follows the base/parent architecture instead of the pipeline default;
+    # an explicit one must match it.
+    adopt_arch = trainer.id == "conventional_classifier" and "model" not in body.params
+    start_arch = None
     if params.get("base_model_id") is not None:
         if not trainer.supports_base_model:
             raise HTTPException(
@@ -131,14 +135,15 @@ def submit_job(body: JobIn, request: Request):
                 "(this pipeline cannot warm-start from a base model)",
             )
         try:
-            check_base_model(
+            row = check_base_model(
                 request.app.state.settings.database_url,
                 params["base_model_id"],
                 trainer.id,
-                params.get("model"),
+                None if adopt_arch else params.get("model"),
             )
         except ValueError as exc:
             raise HTTPException(422, f"invalid params: {exc}") from exc
+        start_arch = row["model_arch"]
     if params.get("parent_model_id") is not None:
         if not trainer.supports_base_model:
             raise HTTPException(
@@ -147,13 +152,19 @@ def submit_job(body: JobIn, request: Request):
                 "(this pipeline cannot start from a finished model)",
             )
         try:
-            check_parent_model(
+            row = check_parent_model(
                 request.app.state.settings,
                 params["parent_model_id"],
                 trainer.id,
-                params,
+                {k: v for k, v in params.items() if k != "model"} if adopt_arch else params,
             )
         except ValueError as exc:
+            raise HTTPException(422, f"invalid params: {exc}") from exc
+        start_arch = row.get("model_arch")
+    if adopt_arch and start_arch and start_arch != params.get("model"):
+        try:
+            params = trainer.validate_params({**body.params, "model": start_arch})
+        except (ValueError, OverflowError) as exc:
             raise HTTPException(422, f"invalid params: {exc}") from exc
     job = _queue(request).enqueue(
         trainer.id,

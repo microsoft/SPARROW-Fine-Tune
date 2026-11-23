@@ -4,7 +4,8 @@
   entry (``sparrow_engine.zoo_models()``) plus anything already installed in
   ``<data_dir>/engine-models``; offline, the installed models are still listed and
   ``catalog_error`` says why the Zoo is missing. Connected (Studio configured): the models
-  of each Studio project, nothing is downloaded from the Zoo.
+  of each Studio project, nothing is downloaded from the Zoo and no Studio bundle is fetched:
+  only a model already imported as a base model is tagged fine-tunable.
 - ``POST /catalog/models/{id}/download`` installs exactly one selected, hosted Zoo entry
   (201; 200 when it is already installed, without calling the Engine). Link-only and
   pending-rights entries answer 422 with their source URL.
@@ -19,7 +20,6 @@ from __future__ import annotations
 import re
 import threading
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -41,9 +41,10 @@ MAX_STUDIO_MODELS = 200
 MAX_INSTALLED_LISTED = 1000
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _DOWNLOAD_LOCK = threading.Lock()
-_TAG_CACHE: dict[tuple, tuple[bool, Optional[str]]] = {}
-_TAG_CACHE_MAX = 2048
-_TAG_LOCK = threading.Lock()
+STUDIO_UNCHECKED = (
+    "not checked yet: importing it as a base model checks its training weights "
+    "(the list never downloads Studio bundles)"
+)
 
 
 def _model_dir(settings) -> Path:
@@ -135,35 +136,17 @@ def _standalone(settings) -> dict:
     return {"mode": "standalone", "models": rows, "catalog_error": error}
 
 
-def _studio_tag(request: Request, settings, project: str, m: dict) -> tuple:
+def _studio_tag(settings, project: str, m: dict) -> tuple:
+    """Tag a Studio model from local evidence only; listing never fetches a bundle.
+
+    Only a model already imported as a base model has passed the training-weights check; any
+    other model is listed as not checked, and importing it runs the full check."""
     studio_id = str(m.get("id"))
-    if m.get("pipeline") not in getattr(
-        base_models, "WARM_START_PIPELINES", {base_models.WARM_START_PIPELINE}
-    ):
+    if m.get("pipeline") not in base_models.WARM_START_PIPELINES:
         return False, f"pipeline {m.get('pipeline')!r} cannot be a warm-start base"
     if base_models.find(settings.database_url, project, studio_id) is not None:
         return True, None
-    key = (settings.studio_url, project, studio_id, m.get("sha256"))
-    with _TAG_LOCK:
-        if key in _TAG_CACHE:
-            return _TAG_CACHE[key]
-    try:
-        bundle, header_sha = studio._download_bundle(
-            request, settings, project, studio_id
-        )
-        base_models.inspect_bundle(bundle, header_sha)
-        result = (True, None)
-    except (
-        base_models.NotImportable,
-        base_models.BundleError,
-        studio.StudioError,
-    ) as exc:
-        result = (False, str(exc) or type(exc).__name__)
-    with _TAG_LOCK:
-        if len(_TAG_CACHE) >= _TAG_CACHE_MAX:
-            _TAG_CACHE.clear()
-        _TAG_CACHE[key] = result
-    return result
+    return False, STUDIO_UNCHECKED
 
 
 def _connected(request: Request, settings) -> dict:
@@ -188,7 +171,7 @@ def _connected(request: Request, settings) -> dict:
                     f"only the first {MAX_STUDIO_MODELS} Studio models are listed"
                 )
                 break
-            ok, reason = _studio_tag(request, settings, p["id"], m)
+            ok, reason = _studio_tag(settings, p["id"], m)
             row = {
                 "id": str(m.get("id")),
                 "name": m.get("source_model_id") or str(m.get("id")),

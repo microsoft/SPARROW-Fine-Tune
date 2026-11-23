@@ -1218,6 +1218,7 @@ class ConventionalClassifierTrainer(Trainer):
         ctx.emit("export", "bundle written", **parity)
         metadata = {
             "labels": list(ctx.labels),
+            "model_arch": params["model"],
             "hardware": trained.get("hardware"),
             **threshold_manifest(report.get("threshold")),
         }

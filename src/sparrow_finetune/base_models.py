@@ -72,10 +72,11 @@ LOCAL_WEIGHTS = "weights.safetensors"
 LOCAL_ARTIFACT = "local_base.zip"
 LOCAL_MANIFEST_KEYS = frozenset({"schema", "pipeline", "model_arch", "labels", "files"})
 MAX_LOCAL_WEIGHTS_BYTES = 1 << 30
-MAX_LOCAL_MANIFEST_BYTES = 128 << 20
+MAX_LOCAL_MANIFEST_BYTES = 16 << 20
 MAX_LOCAL_PACKAGE_BYTES = MAX_LOCAL_WEIGHTS_BYTES + MAX_LOCAL_MANIFEST_BYTES + (1 << 20)
 MAX_SAFETENSORS_HEADER_BYTES = 16 << 20
 MAX_LOCAL_LABELS = 100_000
+MIN_LOCAL_LABELS = 2  # a classifier head needs two classes; the uploader refuses fewer
 MAX_LABEL_CHARS = 256
 # safetensors dtype -> element size in bytes.
 _ST_DTYPE_BYTES = {
@@ -452,6 +453,10 @@ def _local_labels(labels) -> list[str]:
     if not isinstance(labels, list) or not labels:
         raise NotImportable(
             "manifest labels must be a non-empty list of strings, one per classifier head row"
+        )
+    if len(labels) < MIN_LOCAL_LABELS:
+        raise NotImportable(
+            f"manifest lists a single label; a classifier needs at least {MIN_LOCAL_LABELS}"
         )
     if len(labels) > MAX_LOCAL_LABELS:
         raise NotImportable(
@@ -1014,7 +1019,7 @@ def check_parent_model(settings, model_id: int, pipeline: str, params: dict) -> 
         mismatch = _encoder_mismatch(settings, model_id, manifest)
         if mismatch:
             raise ValueError(mismatch)
-    return row
+    return {**row, "model_arch": manifest.get("model_arch")}
 
 
 def stage_parent(settings, model_id: int, workdir: Path) -> dict:
@@ -1074,11 +1079,12 @@ def reuse_preview(settings, model_id: int, snapshot_id: int) -> Optional[dict]:
     if labels is None:
         raise LookupError(f"snapshot {snapshot_id} not found")
 
-    def out(usable: bool, backbone: bool, head: bool, reason: str) -> dict:
+    def out(usable: bool, backbone: bool, head: bool, reason: str, **extra) -> dict:
         return {
             "usable": usable,
             "transfers": {"backbone": backbone, "head": head},
             "reason": reason,
+            **extra,
         }
 
     manifest, reason = _parent_state(settings.objects_dir, row)
@@ -1104,17 +1110,28 @@ def reuse_preview(settings, model_id: int, snapshot_id: int) -> Optional[dict]:
     if mismatch:
         return out(False, False, False, mismatch)
     shared = set(parent_labels) & set(labels)
+    # DINOv3: the encoder is never trained, so it is not a transferred backbone; it is the same
+    # frozen encoder. The linear head is reused row by row for the classes both sides share.
+    dino = {
+        "encoder": "same_frozen",
+        "shared_labels": len(shared),
+        "snapshot_labels": len(labels),
+    }
     if not shared:
         return out(
             True,
             False,
             False,
-            "same encoder, but no labels in common: the linear head is re-initialised",
+            "same frozen encoder, but no classes in common: the linear head starts from zero",
+            **dino,
         )
+    fresh = len(labels) - len(shared)
     return out(
         True,
         False,
         True,
-        f"same encoder: the linear head is reused for {len(shared)} shared label(s); "
-        "the encoder itself is frozen and not trained",
+        f"same frozen encoder (it is not trained): the linear head is reused for "
+        f"{len(shared)} of {len(labels)} class(es)"
+        + (f"; the other {fresh} start from zero" if fresh else ""),
+        **dino,
     )

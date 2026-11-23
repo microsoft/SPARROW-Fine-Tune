@@ -110,7 +110,9 @@ sparrow-uploader prepare-finetune --weights classifier.safetensors --labels labe
 Then, with the image classifier pipeline selected, choose the `.zip` under **Base model →
 Your own image classifier (local package)**, and click **Upload and use**. The package then
 appears in the picker below it for later jobs. The job trains the architecture the package
-names (for example `efficientnet_b0`); a different `model` in the job parameters is refused. If
+names (for example `efficientnet_b0`) when the job parameters leave `model` out; a different
+`model` in the job parameters is refused. The new version records the architecture it trained
+as `model_arch` in its metadata. If
 the package's labels match the snapshot's labels in the same order, the classifier head is
 reused; otherwise the head is re-initialised and only the backbone is loaded.
 
@@ -121,7 +123,8 @@ full before storing anything:
 - `manifest.json` gives `schema`, `pipeline: conventional_classifier`,
   `model_arch` (for example `resnet50` or `efficientnet_b0`), `labels`, and
   `files["weights.safetensors"]` (its sha256).
-- Labels: 1 to 100,000 distinct, non-blank names of at most 256 characters each. They have
+- `manifest.json` is at most 16 MiB, the same limit Sparrow Uploader writes to.
+- Labels: 2 to 100,000 distinct, non-blank names of at most 256 characters each. They have
   no surrounding whitespace and no control characters, and their count must match the
   classifier head.
 - `weights.safetensors` (at most 1 GiB) must hold exactly the tensor names, shapes and dtypes
@@ -158,12 +161,19 @@ new job registers a new version that records it as its parent.
      (head) are both reused;
    - different classes: only the backbone is reused, and the class layer is trained from
      scratch, so it needs about as much labelled data as a new class layer.
-3. Start training. The job keeps the parent's architecture (or DINOv3 encoder). A job that
-   asks for a different architecture or encoder is refused with HTTP 422 and the reason; the
-   preview shows the same limitation before you start.
+   - DINOv3: the encoder is never trained, so nothing of it is "carried over"; the job must use
+     the same frozen encoder. The linear head starts from the finished model's weights for the
+     classes both share, and the preview shows how many (for example "2 of 3 classes"); the
+     other classes start from zero.
+3. Start training. The job keeps the parent's architecture (or DINOv3 encoder); leave `model`
+   out and the parent's architecture is used. A job that asks for a different architecture or
+   encoder is refused with HTTP 422 and the reason; the preview shows the same limitation
+   before you start.
 
 API: `GET /v1/models/{id}/reuse?snapshot_id=<snapshot>` returns
-`{"usable", "transfers": {"backbone", "head"}, "reason"}`; start the job with
+`{"usable", "transfers": {"backbone", "head"}, "reason"}`. For DINOv3 it also returns
+`"encoder": "same_frozen"`, `"shared_labels"` and `"snapshot_labels"`, and `transfers.backbone`
+is false because the encoder is not trained. Start the job with
 `{"params": {"parent_model_id": <id>}}`.
 
 ### Preparing crops before a snapshot
@@ -175,20 +185,27 @@ Studio, and raw images that only have a label, the **Crops for the classifier** 
 Choose one of:
 
 - **Pre-draw boxes on these images only**: runs the installed detector you pick (for example
-  MegaDetector) on the listed images only. Reviewed boxes and Studio crops are not touched.
-  Images where the detector finds nothing stay on the list; they are never dropped silently.
-  Review the pre-drawn boxes before the snapshot. If no detector is installed, this button is
-  disabled.
+  MegaDetector) on the listed images only. Reviewed boxes and Studio crops are not touched,
+  and neither are images a reviewer confirmed: those are skipped and reported separately
+  ("confirmed by a reviewer … not changed"), not as images where nothing was found. Images
+  where the detector finds nothing are reported as such. Both kinds stay on the list; they are
+  never dropped silently. Review the pre-drawn boxes before the snapshot. If no detector is
+  installed, this button is disabled.
 - **Show them so I can draw boxes**: filters the image list to these images. **Show all
   images** clears the filter.
 - **Leave them out of the snapshot**: after a confirmation, creates the snapshot without
-  them. They stay in the dataset with their labels.
+  them. They stay in the dataset with their labels. Only the images you saw listed are left
+  out: if another image started needing a box in the meantime, no snapshot is created and the
+  list is refreshed so you can choose again.
 
 A crop snapshot with images that still need a box is refused (HTTP 409, the images listed)
 until one of these is chosen. Whole-image datasets need no box and no choice. API:
 `GET /v1/datasets/{id}/crop-prep` returns `{"mode", "boxed", "studio_crops", "needs_boxes"}`;
-`POST /v1/datasets/{id}/assist` with `{"images": [...]}` runs only on those images;
-`POST /v1/datasets/{id}/snapshots` with `{"missing_boxes": "exclude"}` leaves them out.
+`POST /v1/datasets/{id}/assist` with `{"images": [...], "needs_boxes_only": true}` runs only
+on those of the images that still need a box (each skipped image is returned in `skipped` with
+its reason); `POST /v1/datasets/{id}/snapshots` with `{"missing_boxes": "exclude",
+"exclude_images": [...]}` leaves exactly those images out and returns HTTP 409 if any other
+image needs a box (without `exclude_images`, every image that needs a box is left out).
 
 ### Model catalogue
 
@@ -207,7 +224,11 @@ installed models are still listed. Nothing is downloaded by listing the catalogu
 is no bulk download.
 
 Connected to Studio, the list shows the Studio project's models; install and manage them in
-Studio. Downloads from this page are refused in that mode.
+Studio. Downloads from this page are refused in that mode. Listing never downloads a Studio
+model bundle, so a Studio model is tagged **Can be fine-tuned** only after it has been imported
+as a base model (the import checks its training weights). Until then a model with a training
+pipeline shows **Fine-tune not supported** with the reason "not checked yet"; importing it is
+the check.
 
 ## 5. Sparrow Studio integration (optional)
 
