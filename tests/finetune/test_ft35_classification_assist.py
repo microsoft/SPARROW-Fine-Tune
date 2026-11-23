@@ -86,8 +86,9 @@ def test_megadetector_on_classification_keeps_animals_and_inherits_labels(
 def test_trained_detector_on_classification_keeps_its_labels(client, settings, fake):  # noqa: F811 (pytest fixture)
     ds = _cls_setup(client)
     import_annotations(client, ds, [{"image": "f.png", "annotations": [{"label": "cat"}, ]}])
-    snap = client.post(f"/v1/datasets/{ds}/snapshots").json()
-    model = _insert_model(settings, snap["id"])
+    snap = client.post(f"/v1/datasets/{ds}/snapshots", json={"missing_boxes": "exclude"})
+    assert snap.status_code == 201, snap.text
+    model = _insert_model(settings, snap.json()["id"])
     r = client.post(f"/v1/datasets/{ds}/assist", json={"model_id": model, "images": ["f.png"]})
     assert r.status_code == 200, r.text
     # "bird" is not a dataset label and is left out, as on detection datasets.

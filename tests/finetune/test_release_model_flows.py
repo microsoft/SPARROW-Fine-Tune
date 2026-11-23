@@ -706,8 +706,9 @@ def test_real_engine_catalogue_has_no_positive_tag_without_training_weights(
             source_url=m.get("original_source_url"),
             raw=dict(m),
         )
-        for m in data["models"]
+        for m in data["model"]
     ]
+    assert entries, "published Engine catalogue is empty"
     FakeEngine(entries).install(monkeypatch)
     rows = _catalog(client)["models"]
     assert len(rows) == len(entries)
