@@ -488,6 +488,29 @@ class TestBrowserFirstRun:
     def registry(self, settings):
         return builtin_registry(settings)
 
+    def test_finished_model_picker_fits_snapshot_panel(self, standalone_server, client, settings):
+        pw = pytest.importorskip("playwright.sync_api")
+        from .test_backlog_service_ui import _browser, _login
+
+        upload_dataset(client, syn("picker-"))
+        add_user(settings, "alice", PASSWORD)
+        with pw.sync_playwright() as playwright:
+            browser, page = _browser(playwright, [])
+            try:
+                _login(page, standalone_server)
+                picker = page.get_by_label("Retrain a finished model on this snapshot")
+                pw.expect(picker).to_be_visible()
+                picker.evaluate("(s) => s.add(new Option('Model #123 · DINOv3 linear probe · job 123 · snapshot 123'))")
+                for width in (1440, 1024, 390, 320):
+                    page.set_viewport_size({"width": width, "height": 900})
+                    panel = page.locator(".readiness").bounding_box()
+                    for child in ("label", ".help-text", "select"):
+                        box = page.locator(f"#parent-model-block {child}").first.bounding_box()
+                        assert panel["x"] <= box["x"]
+                        assert box["x"] + box["width"] <= panel["x"] + panel["width"]
+            finally:
+                browser.close()
+
     def test_detector_snapshot_never_requests_features(self, standalone_server, client, settings):
         pw = pytest.importorskip("playwright.sync_api")
         from .test_backlog_service_ui import _browser, _login

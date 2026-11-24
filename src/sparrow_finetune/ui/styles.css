@@ -1263,6 +1263,8 @@ input[type="text"], input[type="password"], input[type="number"], select {
 select.studio-model-pick { flex: 1 1 260px; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .studio-model-details { margin: 6px 0 0; color: var(--neutral-700); font-size: 12px; }
 .base-model-field { display: grid; gap: 4px; margin-top: 8px; min-width: 0; }
+.parent-model-block { min-width: 0; overflow-wrap: anywhere; }
+.parent-model-block select { width: 100%; text-overflow: ellipsis; }
 .base-model-title { color: var(--neutral-500); font-size: 10px; font-weight: 700; }
 .training-settings { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; min-width: 0; }
 .training-settings[hidden] { display: none; }
