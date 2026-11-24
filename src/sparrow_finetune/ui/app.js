@@ -2768,7 +2768,7 @@ async function startTraining() {
     // names its own timm architecture, so it is never assumed here.
     if (params.base_model_id) params.model = state.baseModel.row.model_arch;
     else if (parent && parentArch(parent)) params.model = parentArch(parent);
-    else if ($("#model-arch").value) params.model = $("#model-arch").value;
+    else if (!parent && $("#model-arch").value) params.model = $("#model-arch").value;
   }
   if (CLASSIFIER_PIPELINES.has(pipeline)) {
     params.threshold_target_accuracy = Number($("#target-accuracy").value);

@@ -259,7 +259,7 @@ def _preview(request: Request, kind: str, target_id: int) -> dict:
         "dataset_names": [d["name"] for d in datasets],
         "images": counts["images"],
         "items": counts["items"],
-        "jobs": len(jobs),
+        "jobs": len(_training(jobs)),
         "active_jobs": [j["id"] for j in jobs if j["state"] in ACTIVE_JOB_STATES],
         "models": [
             {"id": m["id"], "name": m["name"], "in_use": m["in_use"]} for m in models
@@ -294,11 +294,16 @@ def _targets(conn, kind: str, target_id: int, lock: bool) -> tuple[str, list]:
 
 def _jobs_of(conn, dataset_ids: list, lock: bool) -> list:
     return conn.execute(
-        "SELECT j.id, j.state, s.dataset_id FROM jobs j"
+        "SELECT j.id, j.state, j.pipeline, s.dataset_id FROM jobs j"
         " JOIN snapshots s ON s.id = j.snapshot_id WHERE s.dataset_id = ANY(%s)"
         " ORDER BY j.id" + (" FOR UPDATE OF j" if lock else ""),
         (dataset_ids,),
     ).fetchall()
+
+
+def _training(jobs: list) -> list:
+    """Training jobs only: a DINO feature preparation run trains nothing and makes no model."""
+    return [j for j in jobs if j["pipeline"] != features_mod.PREP_PIPELINE]
 
 
 def _models_of(conn, job_ids: list, lock: bool) -> list:
@@ -368,10 +373,10 @@ def _delete_rows(conn, kind: str, target_id: int, include_models: bool) -> tuple
             f"job(s) {', '.join(str(j) for j in active)} of this {kind} are queued or "
             "running. Cancel them first, then delete again.",
         )
-    if jobs and not include_models:
+    if _training(jobs) and not include_models:
         names = {d["id"]: d["name"] for d in datasets}
         per: dict = {}
-        for j in jobs:
+        for j in _training(jobs):
             per.setdefault(j["dataset_id"], []).append(str(j["id"]))
         used = "; ".join(
             f"dataset {names[d]!r} trained job(s) {', '.join(js)}" for d, js in per.items()
