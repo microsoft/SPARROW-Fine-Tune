@@ -36,7 +36,9 @@ def test_browser_progress_then_cached_snapshot(request, settings, registry, clie
             page.on("console", lambda m: problems.append(m.text) if m.type == "error" else None)
             page.on("requestfailed", lambda r: problems.append(f"{r.url}: {r.failure}"))
             _login(page, server)
-            pw.expect(page.locator("#feature-prep-items .feature-missing")).to_have_count(len(items))
+            badges = page.locator(".example-card .photo-wrap .feature-tag")
+            pw.expect(badges).to_have_text(["Pending feature"] * len(items))
+            pw.expect(badges.first).to_be_visible()
             choice = page.locator("#prepare-features")
             button = page.locator("#create-snapshot")
             status = page.locator("#feature-prep-status")
@@ -48,7 +50,7 @@ def test_browser_progress_then_cached_snapshot(request, settings, registry, clie
             assert run_once(settings, "progress-ui", {"cpu"}, registry=registry)
             pw.expect(status).to_contain_text("DINO features ready")
             pw.expect(page.locator("#start-training")).to_be_enabled()
-            pw.expect(page.locator("#feature-prep-items .feature-valid")).to_have_count(len(items))
+            pw.expect(badges).to_have_text(["Feature extracted"] * len(items))
             choice.check()
             button.click()
             pw.expect(status).to_contain_text("No new data")
@@ -60,22 +62,28 @@ def test_browser_progress_then_cached_snapshot(request, settings, registry, clie
     assert problems == []
 
 
-def test_cache_list_exposes_crops_after_first_page(request, settings, client):
+def test_image_badge_accounts_for_all_crops(request, settings, client):
     pw = pytest.importorskip("playwright.sync_api")
     server = request.getfixturevalue("progress_server")
-    upload_dataset(client, syn("large-"))
+    images = syn("large-")
+    upload_dataset(client, images)
     add_user(settings, "alice", PASSWORD)
     with pw.sync_playwright() as playwright:
         browser, page = _browser(playwright, [])
         try:
-            items = [{"image": f"image-{i}.jpg", "crop": [0, 0, 10, 10], "status": "missing"}
-                     for i in range(201)]
+            items = [{"image": images[0].name, "crop": [i, 0, 1, 1], "status": "valid"}
+                     for i in range(200)]
+            items.append({"image": images[0].name, "crop": [200, 0, 1, 1], "status": "stale"})
+            items.append({"image": images[1].name, "crop": [0, 0, 1, 1], "status": "valid"})
             page.route("**/feature-prep", lambda r: r.fulfill(json={
-                "items": items, "counts": {"total": 201, "missing": 201}, "to_compute": 201,
+                "items": items, "counts": {"total": 202, "valid": 201, "stale": 1}, "to_compute": 1,
             }))
             _login(page, server)
-            page.get_by_role("button", name="Show more crops (1 remaining)").click()
-            pw.expect(page.locator("#feature-prep-items li").last).to_contain_text("image-200.jpg")
-            pw.expect(page.locator("#feature-prep-items li").last).to_contain_text("To compute")
+            def badge(i):
+                return page.locator(f'.example-card[data-image="{images[i].name}"] .photo-wrap .feature-tag')
+
+            pw.expect(badge(0)).to_have_text("Pending feature")
+            pw.expect(badge(1)).to_have_text("Feature extracted")
+            pw.expect(badge(2)).to_have_count(0)
         finally:
             browser.close()

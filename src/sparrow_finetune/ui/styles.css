@@ -693,7 +693,7 @@ body.signed-out .app-shell { margin-left: 0; }
 
 .example-card:hover .photo-wrap img { transform: scale(1.025); }
 
-.camera-label, .confidence-label {
+.camera-label, .confidence-label, .feature-tag {
   position: absolute;
   top: 8px;
   padding: 3px 6px;
@@ -708,6 +708,9 @@ body.signed-out .app-shell { margin-left: 0; }
 .confidence-label { right: 8px; }
 .confidence-label.attention { background: rgba(184, 102, 8, .90); }
 .confidence-label.excluded { background: rgba(107, 119, 133, .90); }
+.feature-tag { top: auto; bottom: 8px; right: 8px; }
+.feature-tag.feature-pending { color: var(--neutral-900); background: var(--warning-soft); }
+.feature-tag.feature-valid { color: #176238; background: var(--success-soft); }
 
 .example-body { padding: 11px; }
 .example-body h3 { margin: 7px 0 2px; font-size: 14px; }
@@ -1268,13 +1271,6 @@ select.studio-model-pick { flex: 1 1 260px; min-width: 0; max-width: 100%; text-
 .base-model-info { display: grid; gap: 2px; font-size: 12px; overflow-wrap: anywhere; }
 .feature-prep { display: grid; gap: 6px; margin: 8px 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--neutral-50); font-size: 12px; min-width: 0; }
 .feature-prep h3, .feature-prep p { margin: 0; }
-.feature-prep-list { margin: 0; padding: 0; list-style: none; max-height: 140px; overflow: auto; display: grid; gap: 2px; }
-.feature-prep-item { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
-.feature-prep-name { overflow-wrap: anywhere; min-width: 0; }
-.feature-tag { flex: none; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--neutral-700); background: var(--neutral-100); }
-.feature-tag.feature-valid { color: var(--success); background: var(--success-soft); }
-.feature-tag.feature-stale, .feature-tag.feature-missing { color: var(--neutral-900); background: var(--warning-soft); }
-.feature-tag.feature-corrupt { color: var(--danger); background: var(--danger-soft); }
 .feature-prep-status { display: grid; gap: 6px; margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--info); border-radius: var(--radius-sm); background: var(--info-soft); font-size: 12px; }
 .feature-prep-status[hidden] { display: none; }
 .feature-prep-status p { margin: 0; overflow-wrap: anywhere; }

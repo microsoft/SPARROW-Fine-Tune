@@ -2394,22 +2394,38 @@ async function loadFeaturePrep() {
   }
 }
 
-const FEATURE_TAGS = {
-  valid: "Cached",
-  missing: "To compute",
-  stale: "Stale: recompute",
-  corrupt: "Corrupt: recompute",
-};
-const FEATURE_ITEMS_SHOWN = 200;
+function renderImageFeatureBadges(items) {
+  const crops = new Map();
+  for (const { image, status } of items) {
+    const count = crops.get(image) || { valid: 0, total: 0 };
+    count.total++;
+    if (status === "valid") count.valid++;
+    crops.set(image, count);
+  }
+  for (const card of $("#example-grid").children) {
+    const photo = card.querySelector(".photo-wrap");
+    const count = crops.get(card.dataset.image);
+    const badge = photo.querySelector(".feature-tag");
+    if (!count) {
+      badge?.remove();
+      continue;
+    }
+    const ready = count.valid === count.total;
+    const tag = badge || el("span");
+    tag.className = `feature-tag ${ready ? "feature-valid" : "feature-pending"}`;
+    tag.textContent = ready ? "Feature extracted" : "Pending feature";
+    tag.title = `DINO features extracted for ${count.valid} of ${plural(count.total, "crop")}`;
+    if (!badge) photo.append(tag);
+  }
+}
 
 function renderFeaturePrep() {
   const offered = Boolean(state.dataset && !isDetection());
   $("#feature-prep").hidden = !offered;
-  const list = $("#feature-prep-items");
+  renderImageFeatureBadges(offered ? state.featurePrep?.items || [] : []);
   const summary = $("#feature-prep-summary");
   if (!offered) {
     $("#prepare-features").checked = false;
-    list.replaceChildren();
     summary.textContent = "";
     return;
   }
@@ -2419,12 +2435,10 @@ function renderFeaturePrep() {
   if (prep && prep.available === false) {
     choice.checked = false;
     summary.textContent = prep.message;
-    list.replaceChildren();
     return;
   }
   if (!prep || prep.error) {
     summary.textContent = prep && prep.error ? `Could not read the DINO feature cache: ${prep.error}` : "";
-    list.replaceChildren();
     return;
   }
   const c = prep.counts || {};
@@ -2433,24 +2447,6 @@ function renderFeaturePrep() {
   summary.textContent = todo
     ? `${counts} A prepared snapshot would compute ${plural(todo, "crop")} and reuse the rest.`
     : `${counts} No new data: nothing to compute, every crop already has cached DINO features.`;
-  const items = prep.items || [];
-  const crop = (it) => Array.isArray(it.crop) ? ` · crop (${it.crop.join(", ")})` : "";
-  list.replaceChildren();
-  function appendPage(start) {
-    const end = Math.min(start + FEATURE_ITEMS_SHOWN, items.length);
-    list.append(...items.slice(start, end).map((it) => el("li", { class: "feature-prep-item" },
-      el("span", { class: "feature-prep-name", text: `${it.image}${crop(it)}` }),
-      el("span", { class: `feature-tag feature-${it.status}`, text: FEATURE_TAGS[it.status] || it.status }),
-    )));
-    if (end < items.length) {
-      const more = el("button", { type: "button", class: "btn btn-lite compact",
-        text: `Show more crops (${items.length - end} remaining)` });
-      const row = el("li", {}, more);
-      more.addEventListener("click", () => { row.remove(); appendPage(end); });
-      list.append(row);
-    }
-  }
-  appendPage(0);
 }
 
 const FEATURE_POLL_MS = 1500;

@@ -112,8 +112,9 @@ zoo are for browsing, downloading and running, not as a training starting point.
 ### Preparing DINO features
 
 The DINOv3 pipeline trains on DINO features computed once per crop and cached. Under **Data
-Preparation**, a classification dataset shows the cache state of every image or crop with a
-tag (**Cached**, **To compute**, **Stale: recompute**, **Corrupt: recompute**) and the counts.
+Preparation**, each image with eligible crops shows **Pending feature** until all its crops have
+valid DINO features, then **Feature extracted**. Hover over the tag for the crop count.
+The snapshot panel shows totals for cached, missing, stale, and corrupt crops.
 When every crop is cached, the panel says there is no new data and nothing to compute.
 
 Tick **Prepare DINO features with this snapshot** (off by default) before **Create immutable
