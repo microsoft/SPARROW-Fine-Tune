@@ -14,8 +14,9 @@ resnet50 weights. Scenarios, all through the HTTP API unless named otherwise:
    parameter validation.
 4. Assisted labelling: MegaDetector on real camera-trap images with an animal label; the trained
    YOLO11n model by source (upload / studio), with and without overwrite; error cases.
-5. Classifiers: DINOv3 linear probe twice on one snapshot (embedding cache hits) and the
-   conventional classifier; calibrated threshold in each bundle.
+5. Classifiers: DINOv3 Data Preparation (opt-in snapshot, progress polled to ready) then the
+   linear probe twice, the second time on a zero-work snapshot that reuses every prepared
+   embedding, and the conventional classifier; calibrated threshold in each bundle.
 6. Job and model lifecycle: cancel, retry, rename, local activation, deployments.
 7. The combined chain: Studio import -> assist -> export -> snapshot -> train.
 8. A headless browser pass over the web app controls for all of the above.
@@ -56,7 +57,7 @@ from studio_branch_e2e import (  # noqa: E402
     seed_studio,
     write_override,
 )
-from studio_full_e2e import Api, items_of, wait_job  # noqa: E402
+from studio_full_e2e import Api, items_of, prepare_dino_snapshot, wait_job  # noqa: E402
 
 # A yolo11n trained 40 epochs on about 20 synthetic images scores its detections at only
 # 0.03-0.12 (ONNX and torch agree; offline probe 2026-10-27), so the assist plumbing checks
@@ -466,6 +467,7 @@ def scenario_detection_chain(c: Ctx) -> None:
         "yolo11n auto batch": {
             "model": "yolo11n.pt",
             "epochs": 40,
+            "patience": 40,
             "imgsz": 320,
             "batch": "auto",
         },
@@ -634,6 +636,7 @@ def scenario_detection_chain(c: Ctx) -> None:
     # FT-35: MegaDetector assist on a classification dataset; boxes take the image's label.
     # Assist replaces an item's annotations, so the expected label comes from before the call.
     cls_ds = c.cls_ds
+    api.ok("PATCH", f"/datasets/{cls_ds}", {"whole_image": False})
     cls_before = boxes_of(api, cls_ds)
     st, b = api.call("POST", f"/datasets/{cls_ds}/assist", {"model_id": "megadetector"})
     cls_boxes = boxes_of(api, cls_ds)
@@ -738,7 +741,7 @@ def scenario_classifiers(c: Ctx) -> None:
     ds = api.ok(
         "POST",
         f"/workspaces/{c.ws}/datasets",
-        {"name": "cls crops", "task": "classification"},
+        {"name": "cls crops", "task": "classification", "whole_image": True},
     )["id"]
     c.cls_ds = ds
     rng = random.Random(31)
@@ -752,10 +755,15 @@ def scenario_classifiers(c: Ctx) -> None:
     api.ok("POST", f"/datasets/{ds}/annotations", {"items": items})
     snap = api.ok("POST", f"/datasets/{ds}/snapshots", {})["id"]
     c.cls_snap = snap
+    # DINO embeddings are computed once, in Data Preparation; training only reads them.
+    dino_snap = prepare_dino_snapshot(
+        api, ds, c.train_timeout, "DINOv3 first preparation",
+        expect_new=len(items), expect_reused=0,
+    )["id"]
     first = api.ok(
         "POST",
         "/jobs",
-        {"pipeline": "dinov3_linear", "snapshot_id": snap, "params": {}},
+        {"pipeline": "dinov3_linear", "snapshot_id": dino_snap, "params": {}},
     )["id"]
     conv = api.ok(
         "POST",
@@ -767,10 +775,15 @@ def scenario_classifiers(c: Ctx) -> None:
         },
     )["id"]
     job = wait_job(api, first, c.train_timeout)
+    # Retraining reuses every prepared vector: the next opt-in snapshot has zero work.
+    again = prepare_dino_snapshot(
+        api, ds, c.train_timeout, "DINOv3 retrain reuses prepared embeddings",
+        expect_new=0, expect_reused=len(items),
+    )["id"]
     second = api.ok(
         "POST",
         "/jobs",
-        {"pipeline": "dinov3_linear", "snapshot_id": snap, "params": {}},
+        {"pipeline": "dinov3_linear", "snapshot_id": again, "params": {}},
     )["id"]
     job2 = wait_job(api, second, c.train_timeout)
     c.cls_models = {}
@@ -788,17 +801,12 @@ def scenario_classifiers(c: Ctx) -> None:
         if ok:
             c.cls_models[what] = models[0]
     if len(c.cls_models) == 2:
-        m1, m2 = (
-            c.cls_models["dinov3 first run"]["metrics"],
-            c.cls_models["dinov3 second run"]["metrics"],
-        )
+        prep = api.ok("GET", f"/datasets/{ds}/feature-prep")
         check(
-            "DINOv3 retrain on the same snapshot reuses cached embeddings",
-            m1.get("embedding_cache_misses", 0) > 0
-            and m2.get("embedding_cache_hits", 0) >= 40
-            and m2.get("embedding_cache_misses", 1) == 0,
-            f"first hits/misses={m1.get('embedding_cache_hits')}/{m1.get('embedding_cache_misses')} "
-            f"second={m2.get('embedding_cache_hits')}/{m2.get('embedding_cache_misses')}",
+            "DINOv3 training changed no prepared embedding (all valid, nothing to compute)",
+            prep.get("to_compute") == 0
+            and (prep.get("counts") or {}).get("valid") == len(items),
+            json.dumps(prep.get("counts")),
         )
         man = bundle_manifest(api, c.cls_models["dinov3 second run"]["id"])
         check(
@@ -1015,8 +1023,9 @@ def scenario_ui(c: Ctx) -> None:
             len(page.locator("#pipeline-guide").inner_text()) > 80,
             "",
         )
+        page.locator("#training-settings > summary").click()
         check(
-            "UI: batch automatic option present",
+            "UI: batch automatic option present in training settings",
             page.locator("#batch-auto").is_visible(),
             "",
         )
@@ -1135,6 +1144,7 @@ def main() -> int:
                 f"SPARROW_FT_API_TOKENS={api_token}",
                 "SPARROW_FT_EMBEDDER=onnx:/assets/dinov3_vits16.onnx",
                 "SPARROW_FT_WEIGHTS_DIR=/weights",
+                "SPARROW_FT_GPU_PIPELINES=yolo_detector",
             ]
         )
         + "\n"

@@ -34,7 +34,7 @@ filled-in file.
 | `SPARROW_FT_AUTH_DISABLED` | `1` | `1`: no sign-in, anyone who reaches the port can use the app (intended for use behind Sparrow Studio on a private network). `0`: require an account (`create-user`) or an API token. |
 | `SPARROW_FT_COOKIE_SECURE` | `0` | Set `1` when served over HTTPS. |
 | `SPARROW_FT_SESSION_HOURS` | `12` | Browser session lifetime. |
-| `SPARROW_FT_EMBEDDER` | empty | Image encoder for `dinov3_linear`: `onnx:<path inside the container>` (local ONNX, NCHW float32 input, 224 px) or `engine:<sparrow-engine-url>#<model_id>`. When empty the pipeline is listed but its jobs fail with a configuration error. |
+| `SPARROW_FT_EMBEDDER` | empty | Frozen encoder for DINO feature preparation: `onnx:<container path>` or `engine:<sparrow-engine-url>#<model_id>`. For local ONNX, mount the same encoder read-only at that path in the API and preparation worker. Without an encoder you cannot prepare new DINO features; a training worker can still fit a head on an already-prepared snapshot. |
 | `SPARROW_FT_WEIGHTS_DIR` | empty | Container path of local model weights (section 3). |
 | `SPARROW_FT_GPU_PIPELINES` | empty | Pipelines that only run on a GPU worker, e.g. `yolo_detector,conventional_classifier`. Without a GPU worker their jobs wait with "No GPU worker online". |
 | `SPARROW_FT_MAX_RUNNING_PER_USER` | `0` | Cap on one user's running jobs (`0` = no cap). |
@@ -92,6 +92,130 @@ and `SPARROW_FT_WEIGHTS_DIR=/weights` in `.env.service`. Then start with
 
 Datasets and snapshots can be exported as VOC, COCO or Camtrap DP.
 
+### Choosing how the first model is trained
+
+A first fine-tune on a dataset has two choices on the **Data** page:
+
+- **DINOv3 linear (`dinov3_linear`), marked Recommended.** It trains a new, randomly
+  initialised linear head on a frozen DINOv3 encoder. Because the encoder is not trained, it is
+  usually faster than full fine-tuning and can run on a CPU worker. Speed and accuracy depend on
+  the data and the hardware; neither is promised. It needs DINO features prepared with the
+  snapshot (see "Preparing DINO features" below).
+- **Image classifier (`conventional_classifier`)** with ImageNet starting weights. Pick the
+  architecture under **Architecture (ImageNet starting weights)**: `resnet50` (the default) or
+  `efficientnet_b0`, the two choices `GET /v1/pipelines` lists in `architectures`. The job sends
+  the choice as `params.model`.
+
+Later jobs can start from a model trained here instead (next sections). Models from the model
+zoo are for browsing, downloading and running, not as a training starting point.
+
+### Preparing DINO features
+
+The DINOv3 pipeline trains on DINO features computed once per crop and cached. Under **Data
+Preparation**, a classification dataset shows the cache state of every image or crop with a
+tag (**Cached**, **To compute**, **Stale: recompute**, **Corrupt: recompute**) and the counts.
+When every crop is cached, the panel says there is no new data and nothing to compute.
+
+Tick **Prepare DINO features with this snapshot** (off by default) before **Create immutable
+snapshot**. A progress pane appears at once and follows the real preparation (crops computed,
+crops reused) until it is ready or fails. If no crop needs computing, it reports that nothing
+was computed. On failure, **Retry DINO preparation** creates a prepared snapshot again; crops
+already cached are reused. Snapshots created without the box get no DINO work at all, and a
+DINOv3 job on such a snapshot is refused with a pointer to Data Preparation. Switching to
+another dataset stops showing the previous dataset's progress.
+
+API: `GET /v1/datasets/{id}/feature-prep` returns `{"items", "counts", "to_compute",
+"message"}` (classification datasets only); `POST /v1/datasets/{id}/snapshots` with
+`{"prepare_features": true}` returns the snapshot with `features` (`state`, `total`,
+`to_compute`, `reused`, `done`, `job_id`, `message`); `GET /v1/snapshots/{id}/features`
+reports the same progress, or `{"state": "not_prepared"}`.
+
+**Privacy on a shared install.** Datasets and trained models are stored in
+this service only. They are not linked to any Studio project, and nothing is uploaded to the
+model zoo. Everyone who can sign in to the same service can see the workspaces they share.
+
+### Retraining a finished model on new data
+
+A finished image classifier (`conventional_classifier`) or DINOv3 (`dinov3_linear`) model can
+be the starting point of a new job on a new snapshot. The finished model is not changed; the
+new job registers a new version that records it as its parent.
+
+1. On **Models**, open the finished model and click **Use as base for new training**, or, on
+   **Data**, choose it under **Base model → Retrain a finished model on this snapshot**.
+2. Create the new snapshot. The panel then previews what carries over to that snapshot:
+   - same classes in the same order: the feature extractor (backbone) and the class layer
+     (head) are both reused;
+   - different classes: only the backbone is reused, and the class layer is trained from
+     scratch, so it needs about as much labelled data as a new class layer.
+   - DINOv3: the encoder is never trained, so nothing of it is "carried over"; the job must use
+     the same frozen encoder. The linear head starts from the finished model's weights for the
+     classes both share, and the preview shows how many (for example "2 of 3 classes"); the
+     other classes start from zero.
+3. Start training. The job keeps the parent's architecture (or DINOv3 encoder); leave `model`
+   out and the parent's architecture is used. A job that asks for a different architecture or
+   encoder is refused with HTTP 422 and the reason; the preview shows the same limitation
+   before you start.
+
+API: `GET /v1/models/{id}/reuse?snapshot_id=<snapshot>` returns
+`{"usable", "transfers": {"backbone", "head"}, "reason"}`. For DINOv3 it also returns
+`"encoder": "same_frozen"`, `"shared_labels"` and `"snapshot_labels"`, and `transfers.backbone`
+is false because the encoder is not trained. Start the job with
+`{"params": {"parent_model_id": <id>}}`.
+
+### Preparing crops before a snapshot
+
+Classifier pipelines that train on animal crops need a box on each labelled image. When a
+classification dataset mixes images that already have a reviewed box, crops imported from
+Studio, and raw images that only have a label, the **Crops for the classifier** panel above
+**Create immutable snapshot** counts each group and lists the raw images that still need a box.
+Choose one of:
+
+- **Pre-draw boxes on these images only**: runs the installed detector you pick (for example
+  MegaDetector) on the listed images only. Reviewed boxes and Studio crops are not touched,
+  and neither are images a reviewer confirmed: those are skipped and reported separately
+  ("confirmed by a reviewer … not changed"), not as images where nothing was found. Images
+  where the detector finds nothing are reported as such. Both kinds stay on the list; they are
+  never dropped silently. Review the pre-drawn boxes before the snapshot. If no detector is
+  installed, this button is disabled.
+- **Show them so I can draw boxes**: filters the image list to these images. **Show all
+  images** clears the filter.
+- **Leave them out of the snapshot**: after a confirmation, creates the snapshot without
+  them. They stay in the dataset with their labels. Only the images you saw listed are left
+  out: if another image started needing a box in the meantime, no snapshot is created and the
+  list is refreshed so you can choose again.
+
+A crop snapshot with images that still need a box is refused (HTTP 409, the images listed)
+until one of these is chosen. Whole-image datasets need no box and no choice. API:
+`GET /v1/datasets/{id}/crop-prep` returns `{"mode", "boxed", "studio_crops", "needs_boxes"}`;
+`POST /v1/datasets/{id}/assist` with `{"images": [...], "needs_boxes_only": true}` runs only
+on those of the images that still need a box (each skipped image is returned in `skipped` with
+its reason); `POST /v1/datasets/{id}/snapshots` with `{"missing_boxes": "exclude",
+"exclude_images": [...]}` leaves exactly those images out and returns HTTP 409 if any other
+image needs a box (without `exclude_images`, every image that needs a box is left out).
+
+### Model catalogue
+
+The **Models** page lists, below your trained models, the models you can get. Every row shows,
+before anything is downloaded, one of two tags:
+
+- **Can be fine-tuned**: the model has validated training weights for a pipeline here.
+- **Fine-tune not supported**: the model can run but cannot be a training starting point; the
+  row gives the reason (for example, it ships runtime weights only).
+
+Without Studio (standalone), the list is the local Sparrow Engine model zoo. **Download**
+installs exactly the one model you chose, after a confirmation, into the Engine model folder
+on this server, which every user of the service shares. Models that are only available from
+their publisher show a link to the source instead. If the online catalogue cannot be reached,
+installed models are still listed. Nothing is downloaded by listing the catalogue, and there
+is no bulk download.
+
+Connected to Studio, the list shows the Studio project's models; install and manage them in
+Studio. Downloads from this page are refused in that mode. Listing never downloads a Studio
+model bundle, so a Studio model is tagged **Can be fine-tuned** only after it has been imported
+as a base model (the import checks its training weights). Until then a model with a training
+pipeline shows **Fine-tune not supported** with the reason "not checked yet"; importing it is
+the check.
+
 ## 5. Sparrow Studio integration (optional)
 
 With Studio, the fine-tune app is opened from Studio's "Model fine-tune" page, imports a
@@ -116,10 +240,13 @@ All routes are under `/v1`. The OpenAPI schema is at `/openapi.json`, with inter
 |---|---|
 | Workspaces, datasets | `/workspaces`, `/workspaces/{id}/datasets`, `/datasets/{id}`, `/datasets/{id}/images`, `/datasets/{id}/items` |
 | Import / export | `POST /datasets/{id}/import/{voc,coco,camtrapdp}`, `GET /datasets/{id}/export/{voc,coco,camtrapdp}` |
-| Assisted labelling | `GET /assist/models`, `POST /datasets/{id}/assist` |
-| Snapshots | `POST /datasets/{id}/snapshots`, `/snapshots/{id}` |
+| Assisted labelling | `GET /assist/models`, `POST /datasets/{id}/assist` (optional `images`: only those) |
+| Snapshots | `GET /datasets/{id}/crop-prep`, `POST /datasets/{id}/snapshots` (optional `{"missing_boxes": "exclude"}`), `/snapshots/{id}` |
 | Pipelines, jobs | `GET /pipelines`, `POST /jobs`, `/jobs/{id}`, `/jobs/{id}/events`, `/jobs/{id}/stream` (server-sent events), `cancel`, `retry` |
-| Models | `/models`, `/models/{id}`, `/models/{id}/artifact`, `POST /models/{id}/activate`, `/deployments`, `/stock-models` |
+| Models | `/models`, `/models/{id}`, `/models/{id}/artifact`, `GET /models/{id}/reuse?snapshot_id=`, `POST /models/{id}/activate`, `/deployments`, `/stock-models` |
+| Catalogue | `GET /catalog`, `POST /catalog/models/{id}/download` (one model) |
+| Base models (warm start) | `GET /base-models`, `POST /connectors/studio/models/import` |
+| DINO features | `GET /datasets/{id}/feature-prep`, `POST /datasets/{id}/snapshots` with `{"prepare_features": true}`, `GET /snapshots/{id}/features` |
 
 ## 7. Command line
 

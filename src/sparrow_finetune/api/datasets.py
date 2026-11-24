@@ -17,7 +17,9 @@ from pydantic import BaseModel, Field, FiniteFloat
 from starlette.concurrency import run_in_threadpool
 
 from .. import assist, camtrapdp, coco, interchange, voc
+from .. import features as features_mod
 from ..db import OBJECTS_LOCK, connect
+from ..embedders import embedder_identity
 from ..storage import LocalObjectStore
 from .security import principal_name, record_audit
 
@@ -1043,41 +1045,84 @@ def _dumps(obj) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
+class SnapshotIn(BaseModel):
+    # Crop-trained classification only. ``None`` refuses a snapshot while uploaded images carry
+    # a label but no box (409, names listed). ``"exclude"`` leaves those images out of this
+    # snapshot only; their labels and review status are not changed.
+    missing_boxes: Optional[Literal["exclude"]] = None
+    # Optional guard for ``"exclude"``: the ``needs_boxes`` names the user agreed to leave out
+    # (from ``GET .../crop-prep``). Any other image needing a box (added meanwhile) is a 409.
+    exclude_images: Optional[list[str]] = None
+    # Opt-in DINO Data Preparation (classification only): a worker with the encoder computes the
+    # crops' features once; dinov3_linear training then reads them. Off by default.
+    prepare_features: bool = False
+    feature_input_size: Optional[int] = Field(default=None, ge=32, le=1024)
+
+_SNAPSHOT_ROWS_SQL = """
+    SELECT i.name, i.object_key, i.sha256, i.width, i.height, i.source, it.group_name,
+           coalesce(jsonb_agg(jsonb_build_object('label', a.label, 'bbox', a.bbox) ORDER BY a.id)
+                    FILTER (WHERE a.id IS NOT NULL), '[]'::jsonb) AS annotations
+    FROM dataset_items it
+    JOIN dataset_images i ON i.id = it.image_id
+    LEFT JOIN annotations a ON a.item_id = it.id
+    WHERE it.dataset_id = %s AND it.review_status <> 'excluded'
+    GROUP BY it.id, i.id
+    ORDER BY i.name
+"""
+
+
+def _needs_boxes_conflict(message: str, names: list) -> HTTPException:
+    return HTTPException(409, {"message": message, "needs_boxes": names})
+
+
 @router.post("/datasets/{dataset_id}/snapshots", status_code=201)
-def create_snapshot(dataset_id: int, request: Request):
+def create_snapshot(
+    dataset_id: int, request: Request, body: Optional[SnapshotIn] = None
+):
+    body = body or SnapshotIn()
     with connect(_url(request)) as conn:
+        # The row lock serialises this with annotation writes (they lock the dataset row too),
+        # so the crop plan checked below is exactly what gets written.
         dataset = conn.execute(
             "SELECT * FROM datasets WHERE id = %s FOR UPDATE", (dataset_id,)
         ).fetchone()
         if dataset is None:
             raise HTTPException(404, f"dataset {dataset_id} not found")
-        rows = conn.execute(
-            """
-            SELECT i.name, i.object_key, i.sha256, i.width, i.height, i.source, it.group_name,
-                   coalesce(jsonb_agg(jsonb_build_object('label', a.label, 'bbox', a.bbox) ORDER BY a.id)
-                            FILTER (WHERE a.id IS NOT NULL), '[]'::jsonb) AS annotations
-            FROM dataset_items it
-            JOIN dataset_images i ON i.id = it.image_id
-            LEFT JOIN annotations a ON a.item_id = it.id
-            WHERE it.dataset_id = %s AND it.review_status <> 'excluded'
-            GROUP BY it.id, i.id
-            ORDER BY i.name
-            """,
-            (dataset_id,),
-        ).fetchall()
+        encoder_hash = None
+        input_size = body.feature_input_size or features_mod.DEFAULT_INPUT_SIZE
+        if body.prepare_features:
+            encoder_hash = _feature_encoder(request, dataset, input_size=input_size)
+        rows = conn.execute(_SNAPSHOT_ROWS_SQL, (dataset_id,)).fetchall()
         if not rows:
             raise HTTPException(
                 422,
                 f"dataset {dataset_id} has no annotated items to snapshot"
                 " (excluded items are left out)",
             )
-        rows, left_out = _crop_training_rows(dataset, rows)
+        plan = _crop_plan(dataset, rows)
+        rows = plan["kept"]
         if not rows:
             raise HTTPException(
                 422,
                 f"dataset {dataset_id} trains on box crops but no item has a box: draw boxes,"
                 " run assisted labelling, or turn on whole-image training",
             )
+        needs = plan["needs_boxes"]
+        if needs and body.missing_boxes != "exclude":
+            raise _needs_boxes_conflict(
+                f"{len(needs)} uploaded image(s) have a label but no box, so they cannot train"
+                " as crops: draw boxes, run assisted labelling, or create the snapshot with"
+                ' missing_boxes="exclude" to leave them out of it',
+                needs,
+            )
+        if needs and body.exclude_images is not None:
+            unexpected = sorted(set(needs) - set(body.exclude_images))
+            if unexpected:
+                raise _needs_boxes_conflict(
+                    f"{len(unexpected)} more image(s) need a box than were chosen for"
+                    " exclusion; review them before leaving them out",
+                    unexpected,
+                )
 
         canon = [(_canonical(r), r) for r in rows]
         canon.sort(key=lambda pair: _dumps(pair[0]))
@@ -1112,28 +1157,209 @@ def create_snapshot(dataset_id: int, request: Request):
                     for pos, (c, r) in enumerate(canon)
                 ],
             )
-    return {**snap, "left_out": left_out}
+        prepared = None
+        if body.prepare_features:
+            settings = request.app.state.settings
+            checked = features_mod.statuses(
+                conn,
+                settings.data_dir,
+                features_mod.snapshot_crops(conn, snap["id"]),
+                encoder_hash,
+                input_size,
+            )
+            total = len(checked)
+            to_compute = sum(1 for c in checked if c["status"] != "valid")
+            job_id = None
+            if to_compute:
+                job_id = conn.execute(
+                    "INSERT INTO jobs (pipeline, snapshot_id, params, requires, submitted_by)"
+                    " VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                    (
+                        features_mod.PREP_PIPELINE,
+                        snap["id"],
+                        Jsonb({"input_size": input_size}),
+                        [],
+                        principal_name(request),
+                    ),
+                ).fetchone()["id"]
+            meta = {
+                "encoder_hash": encoder_hash,
+                "input_size": input_size,
+                "total": total,
+                "to_compute": to_compute,
+                "reused": total - to_compute,
+                "job_id": job_id,
+            }
+            conn.execute(
+                "UPDATE snapshots SET features = %s WHERE id = %s", (Jsonb(meta), snap["id"])
+            )
+            prepared = {
+                "state": "queued" if to_compute else "ready",
+                "total": total,
+                "to_compute": to_compute,
+                "reused": total - to_compute,
+                "done": 0,
+                "job_id": job_id,
+                "message": (
+                    f"Data Preparation queued: DINO features for {to_compute} of {total} crop(s)"
+                    f" will be computed by a worker with the encoder; {total - to_compute}"
+                    " prepared vector(s) are reused."
+                    if to_compute
+                    else f"Nothing to compute: all {total} crop(s) already have prepared DINO"
+                    " features. The snapshot is ready for training."
+                ),
+            }
+    return {
+        **snap,
+        "features": prepared,
+        "left_out": len(needs) + len(plan["unlabelled"]),
+        "excluded_without_boxes": needs,
+    }
 
 
-def _crop_training_rows(dataset: dict, rows: list) -> tuple[list, int]:
-    """Rows a snapshot keeps, and how many were left out.
+def _feature_encoder(request: Request, dataset: dict, *, required: bool = True,
+                     input_size: int = features_mod.DEFAULT_INPUT_SIZE) -> Optional[str]:
+    """The encoder identity Data Preparation uses for ``dataset``; 422 when it cannot apply."""
+    if dataset["task"] != "classification":
+        raise HTTPException(
+            422,
+            "DINO Data Preparation applies to classification datasets only;"
+            f" this dataset's task is {dataset['task']}",
+        )
+    spec = request.app.state.settings.embedder
+    if spec and spec.startswith("engine:") and input_size != features_mod.DEFAULT_INPUT_SIZE:
+        raise HTTPException(422, "Engine controls its encoder preprocessing; a custom input size requires local ONNX")
+    encoder_hash = embedder_identity(spec)
+    if encoder_hash is None and required:
+        raise HTTPException(
+            422,
+            "DINO Data Preparation needs the encoder: SPARROW_FT_EMBEDDER is not set or"
+            " names a missing model",
+        )
+    return encoder_hash
+
+
+@router.get("/datasets/{dataset_id}/feature-prep")
+def feature_prep(dataset_id: int, request: Request, input_size: Optional[int] = None):
+    """Per-crop DINO feature status (valid / missing / stale / corrupt) for the next snapshot."""
+    if input_size is not None and not 32 <= input_size <= 1024:
+        raise HTTPException(422, "input_size must be between 32 and 1024")
+    with connect(_url(request)) as conn:
+        dataset = _dataset_or_404(conn, dataset_id)
+        encoder_hash = _feature_encoder(request, dataset, required=False,
+                                        input_size=input_size or features_mod.DEFAULT_INPUT_SIZE)
+        if encoder_hash is None:
+            return {
+                "available": False,
+                "message": "DINO feature preparation is unavailable: configure the frozen encoder first.",
+                "items": [],
+            }
+        rows = conn.execute(_SNAPSHOT_ROWS_SQL, (dataset_id,)).fetchall()
+        kept = _crop_plan(dataset, rows)["kept"] if rows else []
+        checked = features_mod.statuses(
+            conn,
+            request.app.state.settings.data_dir,
+            features_mod.crops(kept),
+            encoder_hash,
+            input_size or features_mod.DEFAULT_INPUT_SIZE,
+        )
+    return {
+        **features_mod.summary(checked),
+        "input_size": input_size or features_mod.DEFAULT_INPUT_SIZE,
+    }
+
+
+@router.get("/snapshots/{snapshot_id}/features")
+def snapshot_features(snapshot_id: int, request: Request):
+    with connect(_url(request)) as conn:
+        row = conn.execute(
+            "SELECT features FROM snapshots WHERE id = %s", (snapshot_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"snapshot {snapshot_id} not found")
+        return features_mod.snapshot_state(
+            conn, request.app.state.settings.data_dir, snapshot_id, row["features"]
+        )
+
+
+def _crop_plan(dataset: dict, rows: list) -> dict:
+    """What a snapshot keeps from the non-excluded item ``rows``, and why the rest is out.
 
     A classification dataset trains on box crops unless ``whole_image`` is on. An item with
-    boxes keeps only its boxes; an image-level label on an uploaded image would train on the
-    whole frame, so such items are left out. Studio imports are already crops and keep their
-    image-level labels."""
+    boxes keeps only its boxes (``boxed``). Studio imports are already crops and keep their
+    image-level labels (``studio_crops``). An uploaded image with labels but no box would train
+    on the whole frame: it is listed in ``needs_boxes`` and blocks a snapshot until the user
+    draws boxes, runs assist or explicitly excludes it. An uploaded item with no annotation has
+    nothing to train on (``unlabelled``). Other datasets keep every row."""
+    plan = {"kept": [], "boxed": [], "studio_crops": [], "needs_boxes": [], "unlabelled": []}
     if dataset["task"] != "classification" or dataset["whole_image"]:
-        return rows, 0
-    kept, left_out = [], 0
+        plan["kept"] = list(rows)
+        return plan
     for r in rows:
         boxes = [a for a in r["annotations"] if a.get("bbox") is not None]
         if boxes:
-            kept.append({**r, "annotations": boxes})
+            plan["kept"].append({**r, "annotations": boxes})
+            plan["boxed"].append(r["name"])
         elif r["source"] == "studio":
-            kept.append(r)
+            plan["kept"].append(r)
+            plan["studio_crops"].append(r["name"])
+        elif r["annotations"]:
+            plan["needs_boxes"].append(r["name"])
         else:
-            left_out += 1
-    return kept, left_out
+            plan["unlabelled"].append(r["name"])
+    return plan
+
+
+def _crop_prep(conn, dataset: dict) -> dict:
+    rows = conn.execute(_SNAPSHOT_ROWS_SQL, (dataset["id"],)).fetchall()
+    no_item = [
+        r["name"]
+        for r in conn.execute(
+            "SELECT i.name FROM dataset_images i WHERE i.dataset_id = %s AND NOT EXISTS"
+            " (SELECT 1 FROM dataset_items it WHERE it.image_id = i.id)",
+            (dataset["id"],),
+        ).fetchall()
+    ]
+    excluded = conn.execute(
+        "SELECT count(*) AS n FROM dataset_items"
+        " WHERE dataset_id = %s AND review_status = 'excluded'",
+        (dataset["id"],),
+    ).fetchone()["n"]
+    if dataset["task"] != "classification":
+        mode = "detection"
+    else:
+        mode = "whole_image" if dataset["whole_image"] else "crop"
+    plan = _crop_plan(dataset, rows)
+    if mode == "crop":
+        boxed, unlabelled = len(plan["boxed"]), plan["unlabelled"]
+    else:
+        boxed = sum(
+            1 for r in rows if any(a.get("bbox") is not None for a in r["annotations"])
+        )
+        unlabelled = [r["name"] for r in rows if not r["annotations"]]
+    return {
+        "mode": mode,
+        "boxed": boxed,
+        "studio_crops": len(plan["studio_crops"]),
+        "needs_boxes": plan["needs_boxes"],
+        "unlabelled": sorted(unlabelled + no_item),
+        "excluded": excluded,
+    }
+
+
+@router.get("/datasets/{dataset_id}/crop-prep")
+def crop_prep(dataset_id: int, request: Request):
+    """What a snapshot would do with each image, shown before the user creates one.
+
+    ``mode`` is ``crop`` (classification trained on box crops), ``whole_image`` or
+    ``detection``; only ``crop`` ever lists ``needs_boxes``. ``boxed`` and ``studio_crops``
+    count images that train as they are. ``needs_boxes`` names uploaded images with a label but
+    no box; a snapshot is refused (409) until each is boxed (drawn, or assist with
+    ``needs_boxes_only``) or the snapshot is created with ``missing_boxes="exclude"``.
+    ``unlabelled`` names images with no label (never in a snapshot) and ``excluded`` counts
+    items a reviewer excluded."""
+    with connect(_url(request)) as conn:
+        return _crop_prep(conn, _dataset_or_404(conn, dataset_id))
 
 
 @router.get("/datasets/{dataset_id}/snapshots")
@@ -1637,6 +1863,9 @@ class AssistIn(BaseModel):
     # Only label images from these sources ("upload": added in this app, "studio": imported
     # from Sparrow Studio). None means every image.
     sources: Optional[list[Literal["upload", "studio"]]] = Field(default=None, min_length=1)
+    # Crop-trained classification only: label just the images ``crop-prep`` lists under
+    # ``needs_boxes`` (reviewed boxes and Studio crops are never re-detected).
+    needs_boxes_only: bool = False
 
 
 @router.get("/assist/models")
@@ -1719,7 +1948,8 @@ def assist_labels(dataset_id: int, body: AssistIn, request: Request):
     On a whole-image dataset (FT-38) the boxes are folded into image-level labels on write.
 
     Targets are ``images`` (by name) or every image in the dataset, narrowed to ``sources``
-    when given (images from other sources are skipped). Excluded items are never
+    when given (images from other sources are skipped), or to the crop-prep ``needs_boxes``
+    images with ``needs_boxes_only``. Excluded items are never
     touched; confirmed items, and items that already have boxes, are skipped unless
     ``overwrite`` is set. An image with no detections above ``conf`` is left unchanged."""
     settings = request.app.state.settings
@@ -1758,13 +1988,20 @@ def assist_labels(dataset_id: int, body: AssistIn, request: Request):
                 )
         images, items = _dataset_images_and_items(conn, dataset_id)
         known = _dataset_labels(conn, dataset_id)
+        needs_boxes = None
+        if body.needs_boxes_only:
+            if task != "classification" or dataset["whole_image"]:
+                raise HTTPException(
+                    422, "needs_boxes_only applies to crop-trained classification datasets only"
+                )
+            needs_boxes = set(_crop_prep(conn, dataset)["needs_boxes"])
     if body.images is not None:
         missing = sorted({n for n in body.images if n not in images})
         if missing:
             raise HTTPException(422, f"unknown images in dataset {dataset_id}: {missing}")
         names = list(dict.fromkeys(body.images))
     else:
-        names = sorted(images)
+        names = sorted(images if needs_boxes is None else needs_boxes & set(images))
     allowed = set(body.sources) if body.sources is not None else set(IMAGE_SOURCES)
     if body.images is None:
         names = [n for n in names if images[n]["source"] in allowed]
@@ -1773,6 +2010,9 @@ def assist_labels(dataset_id: int, body: AssistIn, request: Request):
     targets = []
     for name in names:
         item = items.get(images[name]["id"])
+        if needs_boxes is not None and name not in needs_boxes:
+            skipped.append({"image": name, "reason": "image does not need a box"})
+            continue
         if images[name]["source"] not in allowed:
             skipped.append(
                 {"image": name, "reason": f"image source is {images[name]['source']}, not in sources"}

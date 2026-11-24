@@ -279,6 +279,38 @@ def make_embedder(spec: str) -> Embedder:
     )
 
 
+_IDENTITY_CACHE: dict[tuple, str] = {}
+
+
+def embedder_identity(spec: str) -> Optional[str]:
+    """The ``model_hash`` the embedder built from ``spec`` would record, without loading a model.
+
+    ``onnx:<path>`` -> the file's sha256 (cached by path, size and mtime); ``engine:<url>#<id>``
+    -> ``engine:<id>``. ``None`` when the spec is unset, malformed or names a missing file."""
+    spec = (spec or "").strip()
+    kind, sep, rest = spec.partition(":")
+    rest = rest.strip()
+    if sep and kind == "onnx" and rest:
+        path = Path(rest)
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        if not path.is_file():
+            return None
+        key = (str(path.resolve()), st.st_size, st.st_mtime_ns)
+        if key not in _IDENTITY_CACHE:
+            if len(_IDENTITY_CACHE) > 64:
+                _IDENTITY_CACHE.clear()
+            _IDENTITY_CACHE[key] = _sha256_file(path)
+        return _IDENTITY_CACHE[key]
+    if sep and kind == "engine":
+        url, hash_sep, model_id = rest.rpartition("#")
+        if hash_sep and url.strip() and model_id.strip():
+            return f"engine:{model_id.strip()}"
+    return None
+
+
 # --------------------------------------------------------------------------- embedding cache
 
 CACHE_FORMAT_VERSION = 1

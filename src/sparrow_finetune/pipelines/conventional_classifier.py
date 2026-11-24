@@ -210,6 +210,13 @@ _PARAMS: dict[str, tuple[str, Any, Callable[[Any], bool], str]] = {
         lambda v: v is None or v >= 1,
         "a base model id (an integer >= 1), or null",
     ),
+    # Reuse a finished model of this service (a model_versions id) as the start of a new version.
+    "parent_model_id": (
+        "int",
+        None,
+        lambda v: v is None or v >= 1,
+        "a finished model id (an integer >= 1), or null",
+    ),
     # FT-24: calibrated confidence threshold with an abstain outcome (see ``calibration``).
     **THRESHOLD_PARAMS,
 }
@@ -425,6 +432,11 @@ class ConventionalClassifierTrainer(Trainer):
                     f"parameter {name} must be {requirement}, got {value!r}"
                 )
             out[name] = value
+        if out["base_model_id"] is not None and out["parent_model_id"] is not None:
+            raise ValueError("set base_model_id or parent_model_id, not both")
+        if out["parent_model_id"] is None:
+            # Absent unless set, so jobs without a parent keep their stored params.
+            del out["parent_model_id"]
         if "warmup_epochs" not in params:
             # The default warm-up must not make a short run (e.g. epochs=1) invalid.
             out["warmup_epochs"] = min(out["warmup_epochs"], out["epochs"])
@@ -566,6 +578,9 @@ class ConventionalClassifierTrainer(Trainer):
         """Extract ``weights.pt`` of the base bundle to ``workdir/base_weights.pt`` after checking it."""
         base = ctx.base_model
         path = Path(base["path"])
+        if base.get("origin") == "local":
+            ConventionalClassifierTrainer._stage_local_weights(ctx, path)
+            return
         with zipfile.ZipFile(path) as zf:
             names = set(zf.namelist())
             manifest = (
@@ -590,6 +605,41 @@ class ConventionalClassifierTrainer(Trainer):
         workdir = Path(ctx.workdir)
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "base_weights.pt").write_bytes(data)
+
+    @staticmethod
+    def _stage_local_weights(ctx: JobContext, path: Path) -> None:
+        """Re-validate a local ``sparrow-finetune/base-v1`` package and save its tensors for warm start.
+
+        The package is checked again in full (sha256, safetensors framing, exact timm keys,
+        shapes and dtypes of the declared ``model_arch``, finite values); nothing in it is unpickled or executed."""
+        import torch
+
+        from .. import base_models
+
+        base = ctx.base_model
+        if path.stat().st_size > base_models.MAX_LOCAL_PACKAGE_BYTES:
+            raise ValueError(f"base model {base['id']}: the stored package is too large")
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != base.get("sha256"):
+            raise ValueError(
+                f"base model {base['id']}: the stored package does not match its recorded sha256"
+            )
+        try:
+            facts, state = base_models.load_local_package(data)
+        except base_models.NotImportable as exc:
+            raise ValueError(f"base model {base['id']}: {exc}") from exc
+        if facts["model_arch"] != ctx.params["model"]:
+            raise ValueError(
+                f"base model {base['id']} is a {facts['model_arch']} model, "
+                f"but this job trains {ctx.params['model']}"
+            )
+        if list(facts["labels"]) != list(base["labels"]):
+            raise ValueError(
+                f"base model {base['id']}: the package labels differ from the recorded labels"
+            )
+        workdir = Path(ctx.workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        torch.save(state, workdir / "base_weights.pt")
 
     @staticmethod
     def _warm_start(ctx: JobContext, model, heads) -> None:
@@ -623,7 +673,7 @@ class ConventionalClassifierTrainer(Trainer):
             )
         ctx.emit(
             "train",
-            f"warm start: loaded backbone weights from base model {base['id']} "
+            f"warm start: loaded backbone weights from {base.get('kind', 'base')} model {base['id']} "
             f"({base['model_arch']}); {detail}",
             base_model_id=base["id"],
             head_reused=int(same_labels),
@@ -1168,6 +1218,7 @@ class ConventionalClassifierTrainer(Trainer):
         ctx.emit("export", "bundle written", **parity)
         metadata = {
             "labels": list(ctx.labels),
+            "model_arch": params["model"],
             "hardware": trained.get("hardware"),
             **threshold_manifest(report.get("threshold")),
         }
@@ -1175,4 +1226,6 @@ class ConventionalClassifierTrainer(Trainer):
             metadata["stock_model"] = stock["id"]
         if params.get("base_model_id") is not None:
             metadata["base_model_id"] = params["base_model_id"]
+        if params.get("parent_model_id") is not None:
+            metadata["parent_model_id"] = params["parent_model_id"]
         return ExportResult(path=path, format="onnx-bundle", metadata=metadata)

@@ -10,7 +10,7 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Optional
 
-from . import base_models
+from . import base_models, features
 from .config import Settings
 from .db import connect
 from .jobs import TERMINAL_STATES, CancelRequested, Job, JobQueue, LeaseLost
@@ -285,9 +285,18 @@ def _run_job(
                 _check_cancelled=heart.check,
             )
             ctx.workdir.mkdir(parents=True, exist_ok=True)
+            if job.pipeline == "dinov3_linear":
+                # Training reads the snapshot's prepared vectors; the encoder is not loaded here.
+                ctx.prepared_features = features.load_prepared(
+                    settings, job.snapshot_id
+                )
             if ctx.params.get("base_model_id") is not None:
                 ctx.base_model = base_models.stage(
                     settings, ctx.params["base_model_id"], ctx.workdir
+                )
+            elif ctx.params.get("parent_model_id") is not None:
+                ctx.base_model = base_models.stage_parent(
+                    settings, ctx.params["parent_model_id"], ctx.workdir
                 )
             trainer.prepare(ctx)
 
@@ -395,8 +404,70 @@ def run_once(
             attempt=job.attempts,
         )
         return True
+    if getattr(trainer, "feature_prep", False):
+        _run_prep_job(settings, queue, job, worker_id, lease_seconds, claimed_at)
+        return True
     _run_job(settings, queue, job, trainer, worker_id, lease_seconds, claimed_at)
     return True
+
+
+def _run_prep_job(
+    settings: Settings,
+    queue: JobQueue,
+    job: Job,
+    worker_id: str,
+    lease_seconds: float,
+    claimed_at: Optional[float] = None,
+) -> None:
+    """Data Preparation: compute the snapshot's missing DINO crop features; no model results."""
+    heart = _Heartbeat(
+        queue, job.id, worker_id, lease_seconds, job.attempts, claimed_at
+    )
+    heart.start()
+
+    def event(
+        stage_name: str, message: str = "", metrics: Optional[dict] = None
+    ) -> None:
+        queue.add_event(
+            job.id,
+            stage_name,
+            message,
+            metrics,
+            worker_id=worker_id,
+            attempt=job.attempts,
+        )
+
+    def check() -> None:
+        heart.beat()
+        heart.check()
+
+    try:
+        try:
+            check()
+            event("prepare", "started")
+            result = features.run_preparation(
+                settings,
+                job.snapshot_id,
+                lambda message, metrics: event("prepare", message, metrics),
+                check,
+            )
+            check()
+            queue.complete_without_model(job.id, worker_id, attempt=job.attempts)
+            event("succeeded", f"{result['computed']} crop feature(s) prepared")
+        except (JobCancelled, CancelRequested):
+            queue.mark_cancelled(job.id, worker_id, attempt=job.attempts)
+            event("cancelled", "job cancelled")
+        except LeaseLost:
+            raise
+        except Exception as exc:
+            log.exception("feature preparation job %s failed", job.id)
+            error = str(exc) or type(exc).__name__
+            queue.fail(job.id, worker_id, error, attempt=job.attempts)
+            event("failed", error)
+    except LeaseLost:
+        log.warning("job %s: lease lost; abandoning without writing a result", job.id)
+    finally:
+        heart.stop()
 
 
 def run_forever(

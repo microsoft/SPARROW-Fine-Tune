@@ -439,6 +439,89 @@ def wait_job(api: Api, job_id: int, timeout_s: int) -> dict:
     raise TimeoutError(f"job {job_id} still {job['state']} after {timeout_s}s")
 
 
+FEATURE_KEYS = {"state", "total", "to_compute", "reused", "done", "job_id", "message"}
+
+
+def wait_features(api: Api, snapshot_id: int, timeout_s: int) -> tuple[dict, list]:
+    """Poll ``GET /snapshots/{id}/features`` until it leaves queued/running.
+
+    Returns the final features object and every progress object seen, so a caller can check that
+    ``done`` never decreased and never passed ``to_compute``.
+    """
+    deadline = time.time() + timeout_s
+    seen: list[dict] = []
+    while True:
+        f = api.ok("GET", f"/snapshots/{snapshot_id}/features")
+        seen.append(f)
+        if f.get("state") not in ("queued", "running"):
+            return f, seen
+        if time.time() >= deadline:
+            raise TimeoutError(
+                f"snapshot {snapshot_id} features still {f.get('state')} after {timeout_s}s"
+            )
+        time.sleep(2)
+
+
+def prepare_dino_snapshot(
+    api: Api,
+    ds: int,
+    timeout_s: int,
+    label: str,
+    expect_new: int | None = None,
+    expect_reused: int | None = None,
+) -> dict:
+    """Data Preparation for ``dinov3_linear``: opt-in snapshot, progress polled to ``ready``.
+
+    The DINO embeddings are computed here, during preparation, never during training. A
+    ``dinov3_linear`` job is only accepted on the returned snapshot. ``expect_new`` and
+    ``expect_reused`` pin how much work the snapshot reported (new crops to compute, prepared
+    crops reused); ``expect_new == 0`` additionally requires the zero-work shape: ``ready`` at
+    once, no preparation job and a "nothing to compute" message.
+    """
+    snap = api.ok("POST", f"/datasets/{ds}/snapshots", {"prepare_features": True})
+    f0 = snap.get("features") or {}
+    check(
+        f"{label}: opt-in snapshot reports DINO preparation progress",
+        FEATURE_KEYS <= set(f0)
+        and f0.get("total") == f0.get("to_compute", -1) + f0.get("reused", -1) > 0,
+        json.dumps(f0),
+    )
+    if expect_new is not None or expect_reused is not None:
+        check(
+            f"{label}: preparation computes {expect_new} new and reuses {expect_reused}",
+            (expect_new is None or f0.get("to_compute") == expect_new)
+            and (expect_reused is None or f0.get("reused") == expect_reused),
+            json.dumps(f0),
+        )
+    if expect_new == 0:
+        check(
+            f"{label}: zero work is ready at once with no preparation job",
+            f0.get("state") == "ready"
+            and f0.get("job_id") is None
+            and "nothing to compute" in (f0.get("message") or "").lower(),
+            json.dumps(f0),
+        )
+    elif f0.get("to_compute"):
+        check(
+            f"{label}: work remaining is queued for the worker",
+            f0.get("state") in ("queued", "running")
+            and isinstance(f0.get("job_id"), int),
+            json.dumps(f0),
+        )
+    final, seen = wait_features(api, snap["id"], timeout_s)
+    done = [s.get("done", 0) for s in seen]
+    check(
+        f"{label}: DINO features ready before training",
+        final.get("state") == "ready"
+        and final.get("done") == final.get("to_compute")
+        and done == sorted(done)
+        and all(d <= (final.get("to_compute") or 0) for d in done),
+        f"{len(seen)} polls, done={done[:3]}..{done[-1:]} final={json.dumps(final)}",
+    )
+    snap["features"] = final
+    return snap
+
+
 # --------------------------------------------------------------------------- Studio side
 def studio_rows(dsn: str, project: int) -> list[dict]:
     with psycopg.connect(dsn) as conn:
@@ -677,7 +760,7 @@ def extend_override(
     }
     for name, (url, tok, port) in variants.items():
         svc[name] = {
-            "image": "sparrow-finetune:latest",
+            "image": "sparrow-finetune:${SPARROW_FT_IMAGE_TAG:-latest}",
             "command": ["api", "--host", "0.0.0.0", "--port", "8000"],
             "environment": env(url, tok),
             "volumes": ["ft-data:/data", f"{assets}:/assets:ro"],
@@ -699,7 +782,7 @@ def scenario_classification_sync(c: Ctx) -> None:
     ds = api.ok(
         "POST",
         f"/workspaces/{ws}/datasets",
-        {"name": "A crops", "task": "classification"},
+        {"name": "A crops", "task": "classification", "whole_image": True},
     )["id"]
     c.ds_a = ds
 
@@ -829,6 +912,7 @@ def scenario_classification_sync(c: Ctx) -> None:
         f"snapshot {snap3['item_count']} -> {snap4['item_count']}",
     )
     c.snap_a = snap4
+    c.ds_a = ds
     c.label_counts_a = snap4["label_counts"]
 
 
@@ -1024,6 +1108,21 @@ def scenario_train(c: Ctx) -> None:
             "POST", "/jobs", {"pipeline": pipeline, "snapshot_id": snap, "params": {}}
         )
         check(f"job refused: {what} -> 422", st == 422, f"{st}: {str(body)[:120]}")
+    # dinov3_linear trains only on prepared features: a plain snapshot is refused, naming Data
+    # Preparation; an opt-in snapshot is prepared (progress polled) before the job is submitted.
+    st, body = api.call(
+        "POST",
+        "/jobs",
+        {"pipeline": "dinov3_linear", "snapshot_id": c.snap_a["id"], "params": {}},
+    )
+    check(
+        "job refused: dinov3_linear on an unprepared snapshot -> 422 (Data Preparation)",
+        st == 422 and "Data Preparation" in str(body),
+        f"{st}: {str(body)[:160]}",
+    )
+    c.snap_dino = prepare_dino_snapshot(
+        api, c.ds_a, c.train_timeout, "dinov3_linear Studio data"
+    )
 
     jobs = {
         "conventional_classifier": api.ok(
@@ -1038,7 +1137,11 @@ def scenario_train(c: Ctx) -> None:
         "dinov3_linear": api.ok(
             "POST",
             "/jobs",
-            {"pipeline": "dinov3_linear", "snapshot_id": c.snap_a["id"], "params": {}},
+            {
+                "pipeline": "dinov3_linear",
+                "snapshot_id": c.snap_dino["id"],
+                "params": {},
+            },
         )["id"],
         "yolo_detector": api.ok(
             "POST",

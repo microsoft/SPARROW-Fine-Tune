@@ -21,6 +21,8 @@ const state = {
   assistSummary: null,
   unlabelled: [],
   snapshot: null,
+  featurePrep: null,
+  featureJob: null,
   jobs: [],
   jobId: null,
   jobEvents: [],
@@ -112,7 +114,9 @@ async function api(method, path, body, opts = {}) {
   const headers = {};
   if (method !== "GET" && method !== "HEAD") headers["X-Sparrow-CSRF"] = "1";
   let payload;
-  if (body instanceof Blob || body instanceof ArrayBuffer) {
+  if (body instanceof FormData) {
+    payload = body; // the browser sets the multipart Content-Type with its boundary
+  } else if (body instanceof Blob || body instanceof ArrayBuffer) {
     payload = body;
     headers["Content-Type"] = opts.contentType || "application/octet-stream";
   } else if (body !== undefined) {
@@ -229,7 +233,10 @@ function showPage(page) {
   $$(".view").forEach((v) => { v.hidden = v.dataset.view !== page; });
   $$(".sidebar-nav .nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   if (page === "jobs") return guarded(loadJobs)();
-  if (page === "models") return guarded(loadModels)();
+  if (page === "models") {
+    loadCatalog().catch(() => {});
+    return guarded(loadModels)();
+  }
   return Promise.resolve();
 }
 
@@ -345,6 +352,8 @@ async function loadDatasets(selectId) {
 
 async function loadDataset() {
   state.snapshot = null;
+  // A DINO preparation being watched belongs to one dataset; another dataset never shows it.
+  if (state.featureDatasetId !== state.datasetId) stopFeatureWatch();
   if (!state.datasetId) {
     state.dataset = null;
     state.items = [];
@@ -362,10 +371,14 @@ async function loadDataset() {
       .map((img) => ({ image: img.name, width: img.width, height: img.height, review_status: "unlabelled", annotations: [], unlabelled: true }));
     const filter = $("#example-filter").value;
     const all = [...items, ...state.unlabelled].sort((a, b) => (a.image < b.image ? -1 : a.image > b.image ? 1 : 0));
-    state.items = filter ? all.filter((i) => i.review_status === filter) : all;
+    const only = state.onlyImages && state.onlyImagesDataset === state.datasetId ? state.onlyImages : null;
+    const shown = only ? all.filter((i) => only.has(i.image)) : all;
+    state.items = filter ? shown.filter((i) => i.review_status === filter) : shown;
     const snaps = (await api("GET", `/v1/datasets/${state.datasetId}/snapshots`)).snapshots;
     state.snapshot = snaps.length ? snaps.reduce((a, b) => (a.id > b.id ? a : b)) : null;
   }
+  await loadCropPrep();
+  await loadFeaturePrep();
   $("#topbar-dataset").textContent = state.dataset ? `${state.dataset.name} · ${state.dataset.task}` : "Model fine-tuning";
   renderDatasetPanel();
   renderPipelines();
@@ -373,6 +386,10 @@ async function loadDataset() {
   renderSnapshot();
   renderLabelFormat();
   await renderDetectionTools();
+  renderCropPrep();
+  renderFeaturePrep();
+  watchSnapshotFeatures();
+  await loadParentModels();
 }
 
 function renderPipelines() {
@@ -382,10 +399,11 @@ function renderPipelines() {
   const usable = state.pipelines.filter((p) => !task || p.task === task);
   sel.replaceChildren(...usable.map((p) => el("option", {
     value: p.id,
-    text: p.status === "available" ? p.name : `${p.name} (planned)`,
+    text: p.status !== "available" ? `${p.name} (planned)` : p.recommended ? `${p.name} — Recommended` : p.name,
     disabled: p.status !== "available",
   })));
-  const firstAvailable = usable.find((p) => p.status === "available");
+  const firstAvailable = usable.find((p) => p.status === "available" && p.recommended)
+    || usable.find((p) => p.status === "available");
   if (usable.some((p) => p.id === prev && p.status === "available")) sel.value = prev;
   else if (firstAvailable) sel.value = firstAvailable.id;
   renderPipelineSummary();
@@ -394,9 +412,10 @@ function renderPipelines() {
 // What each pipeline does, written from the trainer code (src/sparrow_finetune/pipelines/*.py).
 const PIPELINE_GUIDES = {
   dinov3_linear: {
-    summary: "Trains only a small linear classifier on top of a frozen image encoder. The encoder is never changed, so training is fast and works with a few dozen labelled crops per species.",
+    summary: "Recommended first choice. Trains only a new, randomly initialised linear head on top of a frozen DINO image encoder. The encoder is never changed, so training is usually faster than fine-tuning a whole network and can run on CPU; how fast and how accurate depends on your data and hardware.",
     steps: [
-      "Prepare: crops every labelled box (or whole image), splits train/validation by group so photos of the same event stay together, and embeds each crop once with the encoder (cached, so retraining skips this).",
+      "Data Preparation: when you tick \"Prepare DINO features\" while creating a snapshot, the encoder embeds each crop of that snapshot once. Crops already cached are reused; DINO training needs a prepared snapshot.",
+      "Prepare: crops every labelled box (or whole image) and splits train/validation by group so photos of the same event stay together.",
       "Train: fits a one-vs-rest logistic-regression head (SGD, L2) one pass per epoch and keeps the epoch with the best validation macro-F1. It must score within 0.02 macro-F1 of a full-batch logistic regression on the same features, or the run fails (with fewer than 100 validation crops it only warns).",
       "Calibrate: picks the lowest confidence threshold that keeps validation accuracy at or above the target (default 95%); predictions below it are labelled unknown and sent to review.",
       "Export: writes the head as ONNX and checks it gives the same scores as scikit-learn before it can be activated.",
@@ -406,7 +425,7 @@ const PIPELINE_GUIDES = {
     when: "First choice for species classification on camera-trap crops, especially with small or medium datasets.",
   },
   conventional_classifier: {
-    summary: "Fine-tunes a whole image classifier (a timm model, ResNet-50 by default) end to end on your crops. Slower than the linear probe and needs more data, but every layer adapts to your images.",
+    summary: "Fine-tunes a whole image classifier end to end on your crops. A first model starts from ImageNet weights of the architecture you choose (timm, PyTorch Image Models); retraining a finished model keeps that model's architecture. Slower than the linear probe and needs more data, but every layer adapts to your images.",
     steps: [
       "Prepare: crops every labelled box (or whole image) and makes the same group-aware train/validation split.",
       "Train: warms up the new classifier head on a frozen backbone, then fine-tunes the whole network with AdamW (backbone at a lower learning rate, cosine decay, label smoothing, augmentation). Keeps the epoch with the best validation macro-F1; stops early when it stops improving.",
@@ -465,7 +484,10 @@ function renderPipelineSummary() {
 
 function updateTrainButton() {
   const p = state.pipelines.find((x) => x.id === $("#pipeline-select").value);
-  $("#start-training").disabled = !(state.snapshot && p && p.status === "available");
+  const needsDino = p && p.id === "dinov3_linear";
+  const sf = state.snapshotFeatures;
+  const ready = state.snapshot && sf && sf.snapshotId === state.snapshot.id && sf.features && sf.features.state === "ready";
+  $("#start-training").disabled = !(state.snapshot && p && p.status === "available" && (!needsDino || ready));
   $("#base-model-field").hidden = !(p && WARM_START_PIPELINES.has(p.id));
   applyBatchField(p);
   $("#target-accuracy-field").hidden = !(p && CLASSIFIER_PIPELINES.has(p.id));
@@ -585,8 +607,38 @@ function syncImgszToWeights() {
   $("#imgsz").value = String(START_WEIGHTS_IMGSZ[$("#start-weights").value] || 640);
 }
 
-// Pipelines that can start from a Studio model's weights (base_models.WARM_START_PIPELINES).
+// Pipelines that can start from a base model's weights (base_models.WARM_START_PIPELINES).
 const WARM_START_PIPELINES = new Set(["conventional_classifier", "yolo_detector", "dinov3_linear"]);
+// ImageNet architectures a first conventional classifier can start from (GET /v1/pipelines).
+const ARCH_PIPELINE = "conventional_classifier";
+
+function archChoices() {
+  const p = state.pipelines.find((x) => x.id === ARCH_PIPELINE);
+  return (p && p.architectures) || [];
+}
+
+// The architecture picker shows only when nothing else fixes the network: no Studio base model
+// and no finished parent model of this pipeline.
+function renderModelArch() {
+  const sel = $("#model-arch");
+  const archs = archChoices();
+  const ids = archs.map((a) => a.id).join(",");
+  if (sel.dataset.ids !== ids) {
+    const prev = sel.value;
+    sel.replaceChildren(...archs.map((a) => el("option", {
+      value: a.id,
+      text: `${a.label || a.name || a.id}${a.default ? " (default)" : ""}`,
+    })));
+    sel.dataset.ids = ids;
+    const def = archs.find((a) => a.default) || archs[0];
+    if (archs.some((a) => a.id === prev)) sel.value = prev;
+    else if (def) sel.value = def.id;
+  }
+  const pipeline = $("#pipeline-select").value;
+  const fixed = Boolean((state.baseModel && state.baseModel.row.pipeline === pipeline)
+    || (state.parentModel && state.parentModel.pipeline === pipeline));
+  $("#model-arch-field").hidden = pipeline !== ARCH_PIPELINE || !archs.length || fixed;
+}
 
 function baseModelAllowed() {
   return WARM_START_PIPELINES.has($("#pipeline-select").value);
@@ -612,6 +664,7 @@ function applyBaseModelGate() {
   if (state.studioModels) fillStudioModels(state.studioModels);
   else $("#studio-model-select").disabled = true;
   renderStudioModelChoice();
+  renderParentModels();
   renderBaseModel();
 }
 
@@ -1422,8 +1475,8 @@ async function createWorkspace() {
   const ws = await api("POST", "/v1/workspaces", { name });
   toggleCreate("workspace", false);
   state.datasetId = null;
-  await loadWorkspaces(ws.id);
   toast(`Workspace "${ws.name}" created`);
+  await loadWorkspaces(ws.id);
 }
 
 async function createDataset() {
@@ -1436,8 +1489,8 @@ async function createDataset() {
     whole_image: $("#new-dataset-task").value === "classification" && $("#new-dataset-whole-image").checked,
   });
   toggleCreate("dataset", false);
-  await loadDatasets(ds.id);
   toast(`Dataset "${ds.name}" created`);
+  await loadDatasets(ds.id);
 }
 
 // Deletion is permanent, so the user types the exact name; anything else cancels.
@@ -1922,32 +1975,211 @@ async function loadLaunchProject() {
   refreshStudioStatus();
 }
 
-// The base model chosen in the Studio panel: { row, name, projectName } or null.
+// The chosen base model: { row, name, projectName } from Sparrow Studio, or null.
 function renderBaseModel() {
   renderStartWeights();
+  renderModelArch();
   const box = $("#base-model-info");
   const chosen = state.baseModel;
   $("#studio-model-clear").disabled = !chosen || !baseModelAllowed();
+  const parent = state.parentModel;
+  if (!chosen && parent && parent.pipeline === $("#pipeline-select").value) {
+    box.replaceChildren(
+      el("strong", { text: `Retraining ${modelTitle(parent)}` }),
+      el("span", { text: `${pipelineName(parent.pipeline)} · model #${parent.id} from job ${parent.job_id} (snapshot ${parent.snapshot_id})` }),
+      el("span", { class: "muted", text: "The finished model is not changed; training makes a new version that records it as the parent." }),
+    );
+    return;
+  }
   if (!chosen) {
     const text = $("#pipeline-select").value === "yolo_detector"
       ? "None — training starts from the starting weights above."
-      : "None — training starts from ImageNet weights.";
+      : `None — training starts from ${$("#pipeline-select").value === ARCH_PIPELINE ? "the chosen architecture's " : ""}ImageNet weights.`;
     box.replaceChildren(el("span", { class: "muted", text }));
     return;
   }
   const { row } = chosen;
   const labels = row.labels || [];
   const shown = labels.slice(0, 8).join(", ") + (labels.length > 8 ? `, +${labels.length - 8} more` : "");
+  const origin = `From Studio project ${chosen.projectName} (Studio model ${row.studio_import_id}) · base model #${row.id}`;
   box.replaceChildren(
     el("strong", { text: chosen.name }),
     el("span", { text: `${row.model_arch} · ${labels.length} class${labels.length === 1 ? "" : "es"}: ${shown}` }),
-    el("span", { class: "muted", text: `From Studio project ${chosen.projectName} (Studio model ${row.studio_import_id}) · base model #${row.id}` }),
+    el("span", { class: "muted", text: origin }),
   );
 }
 
 function clearBaseModel() {
   state.baseModel = null;
   renderBaseModel();
+}
+
+// --------------------------------------------- retrain a finished model (parent reuse)
+
+const FINETUNE_YES = "Can be fine-tuned";
+const FINETUNE_NO = "Fine-tune not supported";
+
+// A finished conventional or DINOv3 classifier can be the starting point of a new job.
+function reusable(m) {
+  return Boolean(m && CLASSIFIER_PIPELINES.has(m.pipeline) && m.finetune_tag !== FINETUNE_NO);
+}
+
+// The architecture a finished model was trained with, when its record names it.
+function parentArch(m) {
+  const md = (m && m.metadata) || {};
+  return md.model_arch || md.model || null;
+}
+
+// Choosing a base model drops a chosen parent, and the other way round: a job starts from one.
+function dropParentModel() {
+  if (!state.parentModel) return;
+  state.parentModel = null;
+  state.reusePreview = null;
+  renderParentModels();
+}
+
+async function loadParentModels() {
+  try {
+    state.parentCandidates = (await workspaceList("/v1/models", "models")).filter(reusable).sort((a, b) => b.id - a.id);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+    state.parentCandidates = [];
+  }
+  renderParentModels();
+}
+
+function renderParentModels() {
+  const pipeline = $("#pipeline-select").value;
+  $("#parent-model-block").hidden = !CLASSIFIER_PIPELINES.has(pipeline);
+  if (state.parentModel && state.parentModel.pipeline !== pipeline) {
+    state.parentModel = null;
+    state.reusePreview = null;
+  }
+  const models = (state.parentCandidates || []).filter((m) => m.pipeline === pipeline);
+  const sel = $("#parent-model-select");
+  sel.replaceChildren(
+    el("option", { value: "", text: models.length ? "No finished model selected" : `No finished ${pipelineName(pipeline)} model yet` }),
+    ...models.map((m) => el("option", {
+      value: String(m.id),
+      text: `${modelTitle(m)} · job ${m.job_id} · snapshot ${m.snapshot_id}`,
+    })),
+  );
+  sel.value = state.parentModel ? String(state.parentModel.id) : "";
+  sel.disabled = !models.length;
+  renderReusePreview();
+}
+
+async function chooseParentModel() {
+  const id = Number($("#parent-model-select").value);
+  state.parentModel = (state.parentCandidates || []).find((m) => m.id === id) || null;
+  state.reusePreview = null;
+  if (state.parentModel) state.baseModel = null;
+  renderBaseModel();
+  await previewReuse();
+}
+
+// GET /v1/models/{id}/reuse?snapshot_id=N: what of the finished model carries over to this snapshot.
+async function previewReuse() {
+  const parent = state.parentModel;
+  const snap = state.snapshot;
+  if (!parent || !snap) {
+    state.reusePreview = null;
+    renderReusePreview();
+    return;
+  }
+  const prev = state.reusePreview;
+  if (prev && prev.modelId === parent.id && prev.snapshotId === snap.id) {
+    renderReusePreview();
+    return;
+  }
+  state.reusePreview = { modelId: parent.id, snapshotId: snap.id, pending: true };
+  renderReusePreview();
+  let result;
+  try {
+    result = await api("GET", `/v1/models/${parent.id}/reuse?snapshot_id=${snap.id}`);
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.status === 401) throw err;
+    result = err.status === 404 && (!err.detail || err.detail === "Not Found")
+      ? { unavailable: true }
+      : { usable: false, reason: detailText(err.detail) || err.message };
+  }
+  if (state.parentModel !== parent || state.snapshot !== snap) return;  // the choice changed meanwhile
+  state.reusePreview = { ...result, modelId: parent.id, snapshotId: snap.id };
+  renderReusePreview();
+}
+
+function renderReusePreview() {
+  const box = $("#reuse-preview");
+  const parent = state.parentModel;
+  const p = state.reusePreview;
+  box.className = "reuse-preview";
+  if (!parent) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  box.hidden = false;
+  const line = (text, cls) => el("p", { class: cls || "", text });
+  if (!state.snapshot) {
+    box.replaceChildren(line("Create a snapshot first. The preview compares the finished model with that snapshot."));
+    return;
+  }
+  if (!p || p.pending) {
+    box.replaceChildren(line("Checking what carries over to this snapshot…", "muted"));
+    return;
+  }
+  if (p.unavailable) {
+    box.replaceChildren(line("This server cannot preview the reuse. Training still checks the model and refuses it with a reason if it does not fit."));
+    return;
+  }
+  const t = p.transfers || {};
+  box.classList.add(p.usable ? "reuse-ok" : "reuse-bad");
+  const nodes = [line(p.usable
+    ? `${modelTitle(parent)} can be the starting point for snapshot ${state.snapshot.id}.`
+    : `${modelTitle(parent)} cannot be retrained on snapshot ${state.snapshot.id}.`, "reuse-verdict")];
+  if (p.usable && p.encoder === "same_frozen") {
+    const shared = Number(p.shared_labels || 0);
+    const total = Number(p.snapshot_labels || 0);
+    nodes.push(el("ul", {},
+      el("li", { text: "DINOv3 encoder: the same frozen encoder; it is never trained, so nothing is lost or changed" }),
+      el("li", { text: shared
+        ? `Linear head: starts from the finished model's weights for ${shared} of ${total} ${total === 1 ? "class" : "classes"}${total > shared ? `; the other ${total - shared} start from zero` : ""}`
+        : "Linear head: no classes in common, so it starts from zero" }),
+    ));
+  } else if (p.usable) {
+    nodes.push(el("ul", {},
+      el("li", { text: `Feature extractor (backbone): ${t.backbone ? "carried over" : "not carried over"}` }),
+      el("li", { text: `Class layer (head): ${t.head ? "carried over, same classes" : "trained from scratch"}` }),
+    ));
+    if (t.backbone && !t.head) nodes.push(line("The classes in this snapshot differ from the finished model, so only the feature extractor is reused. Expect to need about as much labelled data as for a new class layer."));
+  }
+  if (p.reason) nodes.push(line(p.reason, p.usable ? "muted" : "reuse-reason"));
+  nodes.push(line("The architecture (or DINOv3 encoder) comes from the finished model and cannot be changed for this job. The finished model itself is never modified.", "muted"));
+  box.replaceChildren(...nodes);
+}
+
+// Models page → "Use as base for new training": open the Data page with this model as the parent.
+async function reuseModelFromDetail() {
+  const m = state.models.find((x) => x.id === state.modelId);
+  if (!reusable(m)) throw new Error("Only a finished image classifier or DINOv3 model can be the starting point of new training.");
+  await showPage("data");
+  const sel = $("#pipeline-select");
+  if (![...sel.options].some((o) => o.value === m.pipeline && !o.disabled)) {
+    throw new Error(`Open a classification dataset first, then choose ${modelTitle(m)} again on the Models page.`);
+  }
+  if (sel.value !== m.pipeline) {
+    sel.value = m.pipeline;
+    sel.dispatchEvent(new Event("change"));
+  }
+  if (!(state.parentCandidates || []).some((x) => x.id === m.id)) state.parentCandidates = [m, ...(state.parentCandidates || [])];
+  state.parentModel = state.parentCandidates.find((x) => x.id === m.id);
+  state.reusePreview = null;
+  state.baseModel = null;
+  renderParentModels();
+  renderBaseModel();
+  $("#parent-model-block").scrollIntoView({ block: "center" });
+  toast(`${modelTitle(m)} will be the starting point for the next ${pipelineName(m.pipeline)} job`);
+  await previewReuse();
 }
 
 function studioModelName(m) {
@@ -2039,6 +2271,7 @@ async function importStudioModel() {
       name: chosen ? studioModelName(chosen) : `Studio model ${studioModelId}`,
       projectName: studioProjectName(project),
     };
+    dropParentModel();
     renderBaseModel();
     toast(`${state.baseModel.name} will be the base model for the next ${pipelineName(row.pipeline)} job`);
   } finally {
@@ -2061,13 +2294,434 @@ function renderSnapshot() {
   }
   renderSnapshotExport();
   updateTrainButton();
+  if (state.parentModel) previewReuse().catch(() => {});
 }
 
-async function createSnapshot() {
+// missingBoxes="exclude" sends excludeImages, the exact list the user saw, so the server refuses
+// (409) instead of leaving out an image that started needing a box after the user agreed.
+async function createSnapshot(missingBoxes, excludeImages, forcePrepare) {
   if (!state.datasetId) throw new Error("Create or select a dataset first.");
-  const snap = await api("POST", `/v1/datasets/${state.datasetId}/snapshots`);
-  toast(`Snapshot ${snap.id} created with ${snap.item_count} item(s)`);
+  const datasetId = state.datasetId;
+  // DINO feature preparation is opt-in per snapshot; snapshots made without it get no DINO work.
+  const prepare = Boolean(forcePrepare || (!$("#feature-prep").hidden && $("#prepare-features").checked));
+  let snap;
+  let body;
+  if (missingBoxes) {
+    body = { missing_boxes: missingBoxes };
+    if (missingBoxes === "exclude") {
+      body.exclude_images = excludeImages || ((state.cropPrep && state.cropPrep.needs_boxes) || []);
+    }
+  }
+  if (prepare) {
+    body = { ...(body || {}), prepare_features: true };
+    state.featureCreating = true;
+    showFeatureStatus("busy", "Creating the snapshot, then preparing DINO features for its crops…", null);
+  }
+  try {
+    snap = await api("POST", `/v1/datasets/${state.datasetId}/snapshots`, body);
+  } catch (err) {
+    if (prepare && state.datasetId === datasetId) {
+      state.featureCreating = false;
+      renderSnapshotFeatures();
+    }
+    if (err instanceof ApiError && err.status === 409 && missingBoxes === "exclude") {
+      await loadCropPrep();
+      renderCropPrep();
+      throw new Error("More images need a box than the ones you chose to leave out, so no snapshot was created. Review the updated list and choose again.");
+    }
+    if (!(err instanceof ApiError) || err.status !== 409 || missingBoxes) throw err;
+    await loadCropPrep();
+    renderCropPrep();
+    const d = err.detail && typeof err.detail === "object" ? err.detail : {};
+    const needs = (state.cropPrep && state.cropPrep.needs_boxes && state.cropPrep.needs_boxes.length)
+      ? state.cropPrep.needs_boxes : (d.needs_boxes || d.images || []);
+    if (!needs.length) throw err;
+    $("#crop-prep").scrollIntoView({ block: "center" });
+    const options = [];
+    if (cropPrepDetector()) options.push({ value: "assist", label: "Pre-draw boxes with a detector", detail: "Runs the installed detector on these images only. Reviewed boxes, Studio crops and images a reviewer confirmed are not touched." });
+    options.push(
+      { value: "draw", label: "Show them so I can draw boxes", detail: "Filters the image list to these images." },
+      { value: "exclude", label: "Leave them out of this snapshot", detail: "They stay in the dataset and can be boxed later." },
+    );
+    const pick = await chooseDialog(
+      `${plural(needs.length, "image")} need a box`,
+      `This pipeline trains on animal crops, and ${plural(needs.length, "image")} have a label but no box: ${needs.slice(0, 5).join(", ")}${needs.length > 5 ? ", …" : ""}. Nothing is dropped without your choice.`,
+      options,
+    );
+    if (pick === "assist") await cropPrepAssist();
+    else if (pick === "draw") await cropPrepDraw();
+    else if (pick === "exclude") await createSnapshot("exclude", needs, prepare);
+    return;
+  }
+  if (prepare && state.datasetId === datasetId) {
+    state.featureCreating = false;
+    $("#prepare-features").checked = false;
+    state.snapshotFeatures = { snapshotId: snap.id, features: snap.features || { state: "queued" }, error: null };
+  }
+  toast(missingBoxes === "exclude"
+    ? `Snapshot ${snap.id} created with ${snap.item_count} item(s); images without a box were left out`
+    : `Snapshot ${snap.id} created with ${snap.item_count} item(s)`);
   await loadDataset();
+}
+
+// ------------------------------------------------- crop preparation before a snapshot
+
+// GET /v1/datasets/{id}/crop-prep: {mode, boxed, studio_crops, needs_boxes}. Older servers lack it.
+async function loadCropPrep() {
+  state.cropPrep = null;
+  if (!state.datasetId) return;
+  try {
+    state.cropPrep = await api("GET", `/v1/datasets/${state.datasetId}/crop-prep`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+  }
+}
+
+// ------------------------------------------- DINO feature preparation (Data Preparation)
+
+// GET /v1/datasets/{id}/feature-prep: {items: [{image, crop, status}], counts, to_compute, message}.
+// Classification datasets only; the server answers 422 for detection.
+async function loadFeaturePrep() {
+  state.featurePrep = null;
+  const id = state.datasetId;
+  if (!id || !state.dataset || isDetection()) return;
+  try {
+    const prep = await api("GET", `/v1/datasets/${id}/feature-prep`);
+    if (state.datasetId === id) state.featurePrep = prep;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+    if (state.datasetId === id) state.featurePrep = { error: err.message };
+  }
+}
+
+const FEATURE_TAGS = {
+  valid: "Cached",
+  missing: "To compute",
+  stale: "Stale: recompute",
+  corrupt: "Corrupt: recompute",
+};
+const FEATURE_ITEMS_SHOWN = 200;
+
+function renderFeaturePrep() {
+  const offered = Boolean(state.dataset && !isDetection());
+  $("#feature-prep").hidden = !offered;
+  const list = $("#feature-prep-items");
+  const summary = $("#feature-prep-summary");
+  if (!offered) {
+    $("#prepare-features").checked = false;
+    list.replaceChildren();
+    summary.textContent = "";
+    return;
+  }
+  const prep = state.featurePrep;
+  const choice = $("#prepare-features");
+  choice.disabled = !prep || Boolean(prep.error) || prep.available === false;
+  if (prep && prep.available === false) {
+    choice.checked = false;
+    summary.textContent = prep.message;
+    list.replaceChildren();
+    return;
+  }
+  if (!prep || prep.error) {
+    summary.textContent = prep && prep.error ? `Could not read the DINO feature cache: ${prep.error}` : "";
+    list.replaceChildren();
+    return;
+  }
+  const c = prep.counts || {};
+  const todo = prep.to_compute !== undefined ? prep.to_compute : (c.missing || 0) + (c.stale || 0) + (c.corrupt || 0);
+  const counts = `${plural(c.total || 0, "crop")}: ${c.valid || 0} cached, ${c.missing || 0} missing, ${c.stale || 0} stale, ${c.corrupt || 0} corrupt.`;
+  summary.textContent = todo
+    ? `${counts} A prepared snapshot would compute ${plural(todo, "crop")} and reuse the rest.`
+    : `${counts} No new data: nothing to compute, every crop already has cached DINO features.`;
+  const items = prep.items || [];
+  const crop = (it) => Array.isArray(it.crop) ? ` · crop (${it.crop.join(", ")})` : "";
+  list.replaceChildren();
+  function appendPage(start) {
+    const end = Math.min(start + FEATURE_ITEMS_SHOWN, items.length);
+    list.append(...items.slice(start, end).map((it) => el("li", { class: "feature-prep-item" },
+      el("span", { class: "feature-prep-name", text: `${it.image}${crop(it)}` }),
+      el("span", { class: `feature-tag feature-${it.status}`, text: FEATURE_TAGS[it.status] || it.status }),
+    )));
+    if (end < items.length) {
+      const more = el("button", { type: "button", class: "btn btn-lite compact",
+        text: `Show more crops (${items.length - end} remaining)` });
+      const row = el("li", {}, more);
+      more.addEventListener("click", () => { row.remove(); appendPage(end); });
+      list.append(row);
+    }
+  }
+  appendPage(0);
+}
+
+const FEATURE_POLL_MS = 1500;
+let featureSeq = 0;
+
+// kind: busy (progress bar), ready, failed (retry button), info (hint only).
+function showFeatureStatus(kind, text, progress) {
+  state.featureDatasetId = state.datasetId;
+  const pane = $("#feature-prep-status");
+  pane.hidden = false;
+  pane.dataset.state = kind;
+  pane.setAttribute("aria-busy", kind === "busy" ? "true" : "false");
+  $("#feature-prep-status-text").textContent = text;
+  const bar = $("#feature-prep-progress");
+  bar.hidden = kind === "info" || kind === "failed";
+  if (progress === null || progress === undefined) bar.removeAttribute("value");
+  else bar.value = progress;
+  $("#feature-prep-retry").hidden = kind !== "failed";
+}
+
+function hideFeatureStatus() {
+  $("#feature-prep-status").hidden = true;
+}
+
+// Stops polling and forgets the watched snapshot; any response still in flight is ignored.
+function stopFeatureWatch() {
+  featureSeq += 1;
+  if (state.featureJob && state.featureJob.timer) clearTimeout(state.featureJob.timer);
+  state.featureJob = null;
+  state.snapshotFeatures = null;
+  state.featureCreating = false;
+  hideFeatureStatus();
+}
+
+function featureBusy(f) {
+  return Boolean(f && (f.state === "queued" || f.state === "running"));
+}
+
+function featureText(snapId, f) {
+  const n = (v) => (typeof v === "number" ? v : 0);
+  if (f.state === "ready") {
+    return n(f.to_compute)
+      ? `DINO features ready for snapshot ${snapId}: ${n(f.done) || n(f.to_compute)} computed, ${n(f.reused)} reused from the cache.`
+      : `DINO features ready for snapshot ${snapId}. No new data: all ${plural(n(f.total), "crop")} were already cached, so nothing was computed.`;
+  }
+  if (f.state === "queued") {
+    return `Preparing DINO features for snapshot ${snapId}: queued, ${n(f.to_compute)} of ${plural(n(f.total), "crop")} to compute, ${n(f.reused)} reused.`;
+  }
+  if (f.state === "running") {
+    return `Preparing DINO features for snapshot ${snapId}: ${n(f.done)} of ${n(f.to_compute)} computed, ${n(f.reused)} reused.`;
+  }
+  return `DINO features for snapshot ${snapId} are not ready (${f.state}). ${f.message || ""}`;
+}
+
+function renderSnapshotFeatures() {
+  updateTrainButton();
+  if (state.featureCreating) return;
+  const sf = state.snapshotFeatures;
+  if (!sf || !state.snapshot || sf.snapshotId !== state.snapshot.id) {
+    hideFeatureStatus();
+    return;
+  }
+  if (sf.error) {
+    showFeatureStatus("failed", `Could not read DINO preparation progress for snapshot ${sf.snapshotId}: ${sf.error}`);
+    return;
+  }
+  const f = sf.features || {};
+  if (!f.state || f.state === "not_prepared") {
+    if ($("#pipeline-select").value === "dinov3_linear") {
+      showFeatureStatus("info", `Snapshot ${sf.snapshotId} has no DINO features prepared, so DINO training cannot start from it. Tick "Prepare DINO features with this snapshot" in Data Preparation and create a snapshot.`);
+    } else {
+      hideFeatureStatus();
+    }
+    return;
+  }
+  const busy = featureBusy(f);
+  const ready = f.state === "ready";
+  let progress = 0;
+  if (ready) progress = 1;
+  else if (busy) progress = f.to_compute ? Math.min(1, (f.done || 0) / f.to_compute) : null;
+  showFeatureStatus(busy ? "busy" : ready ? "ready" : "failed", featureText(sf.snapshotId, f), progress);
+}
+
+// Called after every dataset load: watch the dataset's latest snapshot only.
+function watchSnapshotFeatures() {
+  const snap = state.snapshot;
+  if (!snap || isDetection()) {
+    stopFeatureWatch();
+    return;
+  }
+  if (state.featureJob && state.featureJob.snapshotId === snap.id && state.featureJob.datasetId === state.datasetId) {
+    renderSnapshotFeatures();
+    return;
+  }
+  if (state.featureJob && state.featureJob.timer) clearTimeout(state.featureJob.timer);
+  featureSeq += 1;
+  state.featureDatasetId = state.datasetId;
+  const job = { token: featureSeq, datasetId: state.datasetId, snapshotId: snap.id, timer: null };
+  state.featureJob = job;
+  const sf = state.snapshotFeatures;
+  if (sf && sf.snapshotId === snap.id && sf.features) {
+    renderSnapshotFeatures();
+    scheduleFeaturePoll(job);
+  } else {
+    state.snapshotFeatures = null;
+    renderSnapshotFeatures();
+    pollFeatures(job);
+  }
+}
+
+function scheduleFeaturePoll(job) {
+  const sf = state.snapshotFeatures;
+  if (state.featureJob !== job || job.token !== featureSeq || !sf || !featureBusy(sf.features)) return;
+  job.timer = setTimeout(() => { pollFeatures(job); }, FEATURE_POLL_MS);
+}
+
+// GET /v1/snapshots/{id}/features. A response for a dataset or snapshot no longer shown is dropped.
+async function pollFeatures(job) {
+  job.timer = null;
+  let features = null;
+  let error = null;
+  try {
+    features = await api("GET", `/v1/snapshots/${job.snapshotId}/features`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return;
+    if (err instanceof ApiError && err.status === 404) features = { state: "not_prepared" };
+    else error = err && err.message ? err.message : String(err);
+  }
+  const current = state.featureJob === job && job.token === featureSeq && state.datasetId === job.datasetId
+    && state.snapshot && state.snapshot.id === job.snapshotId;
+  if (!current) return;
+  state.snapshotFeatures = { snapshotId: job.snapshotId, features, error };
+  renderSnapshotFeatures();
+  scheduleFeaturePoll(job);
+  if (features && features.state === "ready") {
+    await loadFeaturePrep();
+    if (state.featureJob === job) renderFeaturePrep();
+  }
+}
+
+async function retryFeaturePrep() {
+  const sf = state.snapshotFeatures;
+  const job = state.featureJob;
+  if (sf && sf.error && job && job.snapshotId === sf.snapshotId) {
+    // Reading progress failed: read it again rather than preparing anything new.
+    showFeatureStatus("busy", `Reading DINO preparation progress for snapshot ${sf.snapshotId}…`, null);
+    await pollFeatures(job);
+    return;
+  }
+  if (job && sf && sf.features && sf.features.job_id
+      && ["failed", "cancelled"].includes(sf.features.state)) {
+    await api("POST", `/v1/jobs/${sf.features.job_id}/retry`);
+    if (state.featureJob === job) await pollFeatures(job);
+    return;
+  }
+  await createSnapshot(undefined, undefined, true);
+}
+
+function cropPrepDetector() {
+  const sel = $("#crop-prep-detector");
+  const opt = sel.options[sel.selectedIndex];
+  return opt && opt.value && !opt.disabled ? opt.value : "";
+}
+
+function renderCropPrep() {
+  const box = $("#crop-prep");
+  const prep = state.cropPrep;
+  const filtering = Boolean(state.onlyImages && state.onlyImagesDataset === state.datasetId);
+  $("#crop-prep-show-all").hidden = !filtering;
+  if (!prep || prep.mode !== "crop") {
+    box.hidden = !filtering;
+    $("#crop-prep-needs").hidden = true;
+    $("#crop-prep-summary").textContent = filtering ? "Showing only the images that needed a box." : "";
+    return;
+  }
+  box.hidden = false;
+  const needs = prep.needs_boxes || [];
+  const parts = [`${plural(prep.boxed || 0, "image")} with a reviewed box`, `${plural(prep.studio_crops || 0, "Studio crop")}`];
+  if (needs.length) parts.push(`${plural(needs.length, "image")} still need a box`);
+  $("#crop-prep-summary").textContent = `This pipeline trains on animal crops. ${parts.join(", ")}.`
+    + (needs.length ? "" : " All labelled images are ready for a snapshot.");
+  $("#crop-prep-needs").hidden = !needs.length;
+  if (!needs.length) return;
+  $("#crop-prep-needs-text").textContent = `These raw images have a label but no box. Choose how to handle ${needs.length === 1 ? "it" : "them"} before the snapshot; none is dropped silently. Images where the detector finds nothing stay on this list, and so do images a reviewer confirmed: the detector never changes a confirmed image.`;
+  const shown = needs.slice(0, 20);
+  $("#crop-prep-list").replaceChildren(
+    ...shown.map((n) => el("li", { text: n })),
+    ...(needs.length > shown.length ? [el("li", { class: "muted", text: `…and ${needs.length - shown.length} more` })] : []),
+  );
+  const src = $("#assist-model");
+  const sel = $("#crop-prep-detector");
+  const prev = sel.value;
+  sel.replaceChildren(...[...src.options].map((o) => o.cloneNode(true)));
+  if ([...sel.options].some((o) => o.value === prev && !o.disabled)) sel.value = prev;
+  else {
+    const first = [...sel.options].find((o) => o.value && !o.disabled);
+    if (first) sel.value = first.value;
+  }
+  const usable = Boolean(cropPrepDetector());
+  sel.disabled = !usable;
+  $("#crop-prep-assist").disabled = !usable;
+  if (!usable) $("#crop-prep-status").textContent = "No detector is installed on this service, so boxes cannot be pre-drawn. Draw the boxes yourself or leave these images out.";
+  else if ($("#crop-prep-status").dataset.kind !== "result") $("#crop-prep-status").textContent = "";
+}
+
+// Runs the chosen installed detector on the images that still need a box, and only on them.
+async function cropPrepAssist() {
+  const modelId = cropPrepDetector();
+  if (!modelId) throw new Error("No detector is installed. Draw the boxes yourself or leave these images out.");
+  const needs = (state.cropPrep && state.cropPrep.needs_boxes) || [];
+  if (!needs.length) return;
+  const status = $("#crop-prep-status");
+  let written = 0;
+  const confirmed = [];
+  const empty = [];
+  const other = [];
+  await withBusy(`Pre-drawing boxes on ${plural(needs.length, "image")}…`, $("#crop-prep-assist"), async () => {
+    for (let i = 0; i < needs.length; i += ASSIST_MAX_ITEMS) {
+      const images = needs.slice(i, i + ASSIST_MAX_ITEMS);
+      const res = await api("POST", `/v1/datasets/${state.datasetId}/assist`, {
+        model_id: modelId, images, sources: ["upload", "studio"], conf: assistConf(), overwrite: false,
+        needs_boxes_only: true,
+      });
+      written += Number((res && res.items_written) || 0);
+      for (const s of (res && res.skipped) || []) {
+        const reason = String((s && s.reason) || "");
+        if (/confirmed/i.test(reason)) confirmed.push(s.image);
+        else if (/^no detections/i.test(reason)) empty.push(s.image);
+        else other.push(s.image);
+      }
+    }
+  });
+  await loadDataset();
+  const left = ((state.cropPrep && state.cropPrep.needs_boxes) || []).length;
+  const them = (n) => (n === 1 ? "it" : "them");
+  const parts = [`Boxes pre-drawn on ${plural(written, "image")}.`];
+  // Confirmed images are protected: the detector never replaces a reviewer's decision, so they
+  // are skipped, not "nothing found".
+  if (confirmed.length) parts.push(`${plural(confirmed.length, "image")} confirmed by a reviewer ${confirmed.length === 1 ? "was" : "were"} skipped and not changed (${confirmed.slice(0, 3).join(", ")}${confirmed.length > 3 ? ", …" : ""}); draw a box yourself or leave ${them(confirmed.length)} out.`);
+  if (empty.length) parts.push(`The detector found nothing on ${plural(empty.length, "image")}; draw a box or leave ${them(empty.length)} out.`);
+  if (other.length) parts.push(`${plural(other.length, "image")} ${other.length === 1 ? "was" : "were"} skipped for another reason (for example changed while the detector ran).`);
+  if (left) parts.push(`${plural(left, "image")} still need a box.`);
+  parts.push("Review the pre-drawn boxes before the snapshot.");
+  status.dataset.kind = "result";
+  status.textContent = parts.join(" ");
+  toast(`Pre-drawn boxes on ${plural(written, "image")}`);
+}
+
+async function cropPrepDraw() {
+  const needs = (state.cropPrep && state.cropPrep.needs_boxes) || [];
+  if (!needs.length) return;
+  state.onlyImages = new Set(needs);
+  state.onlyImagesDataset = state.datasetId;
+  await loadDataset();
+  $("#example-grid").scrollIntoView({ block: "start" });
+}
+
+async function cropPrepShowAll() {
+  state.onlyImages = null;
+  state.onlyImagesDataset = null;
+  await loadDataset();
+}
+
+async function cropPrepExclude() {
+  const needs = (state.cropPrep && state.cropPrep.needs_boxes) || [];
+  const ok = await chooseDialog(
+    "Leave these images out?",
+    `${plural(needs.length, "image")} without a box will not be in this snapshot. They stay in the dataset, and their labels are kept.`,
+    [{ value: "exclude", label: "Create the snapshot without them" }],
+  );
+  if (ok === "exclude") await createSnapshot("exclude", needs);
 }
 
 // Shows a blocking "working" panel while fn runs, and disables the button that started it.
@@ -2091,7 +2745,14 @@ async function startTraining() {
   const pipeline = $("#pipeline-select").value;
   if (!state.snapshot) throw new Error("Create a snapshot first.");
   const params = {};
-  if (state.baseModel && state.baseModel.row.pipeline === pipeline) {
+  const parent = state.parentModel && state.parentModel.pipeline === pipeline ? state.parentModel : null;
+  if (parent) {
+    const preview = state.reusePreview;
+    if (preview && preview.snapshotId === state.snapshot.id && preview.usable === false) {
+      throw new Error(`${modelTitle(parent)} cannot be retrained on snapshot ${state.snapshot.id}: ${preview.reason || "it does not fit this snapshot"}. Choose another model or clear the selection.`);
+    }
+    params.parent_model_id = parent.id;
+  } else if (state.baseModel && state.baseModel.row.pipeline === pipeline) {
     params.base_model_id = state.baseModel.row.id;
   }
   if (pipeline === "yolo_detector") {
@@ -2100,7 +2761,14 @@ async function startTraining() {
     params.batch = batchParam(pipeline);
     params.imgsz = Number($("#imgsz").value);
   }
-  if (pipeline === "conventional_classifier") params.batch = batchParam(pipeline);
+  if (pipeline === "conventional_classifier") {
+    params.batch = batchParam(pipeline);
+    // A base model or finished parent fixes the network the job trains; the package or model
+    // names its own timm architecture, so it is never assumed here.
+    if (params.base_model_id) params.model = state.baseModel.row.model_arch;
+    else if (parent && parentArch(parent)) params.model = parentArch(parent);
+    else if ($("#model-arch").value) params.model = $("#model-arch").value;
+  }
   if (CLASSIFIER_PIPELINES.has(pipeline)) {
     params.threshold_target_accuracy = Number($("#target-accuracy").value);
     if ($("#stock-model").value) params.stock_model = $("#stock-model").value;
@@ -2447,6 +3115,15 @@ function renderModel() {
   $("#studio-deploy-label").hidden = !state.studio.configured;
   loadStudioDetectors();
   $("#model-download").href = `/v1/models/${m.id}/artifact`;
+  const ft = $("#model-finetune");
+  const tag = m.finetune_tag === FINETUNE_YES || m.finetune_tag === FINETUNE_NO ? m.finetune_tag : null;
+  ft.hidden = !tag;
+  ft.className = `model-finetune ${tag === FINETUNE_YES ? "finetune-yes" : "finetune-no"}`;
+  ft.replaceChildren(...(tag ? [
+    el("span", { class: `finetune-tag ${tag === FINETUNE_YES ? "finetune-yes" : "finetune-no"}`, text: tag }),
+    ...(m.finetune_reason ? [el("span", { class: "muted", text: ` ${m.finetune_reason}` })] : []),
+  ] : []));
+  $("#model-reuse").hidden = !reusable(m);
   renderStudioInstalls(m);
 
   renderStockComparison(m.stock_comparison);
@@ -2472,7 +3149,86 @@ function renderModel() {
   ];
   const hw = hardwareText(m.metadata && m.metadata.hardware);
   if (hw) record.push(["Trained on", hw]);
+  const parentId = m.metadata && m.metadata.parent_model_id;
+  if (parentId) record.push(["Started from", `Model #${parentId}`]);
   $("#model-record").replaceChildren(...record.map(([k, v]) => el("div", {}, el("dt", { text: k }), el("dd", { text: v }))));
+}
+
+// ------------------------------------------------------------- model catalogue
+
+// GET /v1/catalog: {mode: "standalone"|"connected", models, catalog_error}. Every row carries a
+// fine-tune tag before anything is downloaded; downloads install one chosen id at a time.
+async function loadCatalog() {
+  const err = $("#catalog-error");
+  const status = $("#catalog-status");
+  err.hidden = true;
+  status.textContent = "Loading the catalogue…";
+  let body;
+  try {
+    body = await api("GET", "/v1/catalog");
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) throw e;
+    $("#catalog-list").replaceChildren();
+    status.textContent = "";
+    err.hidden = false;
+    err.textContent = e instanceof ApiError && e.status === 404
+      ? "This server does not list a model catalogue."
+      : `The catalogue could not be loaded: ${e.message}`;
+    return;
+  }
+  state.catalog = body;
+  const connected = body.mode === "connected";
+  $("#catalog-title").textContent = connected ? "Models in Sparrow Studio" : "Model Zoo (Sparrow Engine)";
+  $("#catalog-mode-note").textContent = connected
+    ? "This service is connected to Sparrow Studio. The list shows the Studio project's models; install and manage them in Studio. Nothing is downloaded here."
+    : "Standalone mode: the list comes from the local Sparrow Engine model zoo. Nothing is downloaded until you choose one model and confirm.";
+  if (body.catalog_error) {
+    err.hidden = false;
+    err.textContent = `The online catalogue is unavailable (${body.catalog_error}). Installed models are still listed and usable.`;
+  }
+  const models = body.models || [];
+  $("#catalog-list").replaceChildren(...models.map((row) => catalogRow(row, connected)));
+  const yes = models.filter((r) => r.finetune_tag === FINETUNE_YES).length;
+  status.textContent = models.length
+    ? `${plural(models.length, "model")} listed; ${yes} can be fine-tuned.`
+    : "The catalogue lists no models.";
+}
+
+function catalogRow(row, connected) {
+  const tag = row.finetune_tag === FINETUNE_YES ? FINETUNE_YES : FINETUNE_NO;
+  const yes = tag === FINETUNE_YES;
+  const facts = [row.task, row.domain, row.format, row.license ? `licence ${row.license}` : "no licence listed"].filter(Boolean).join(" · ");
+  let action;
+  if (row.installed) action = el("span", { class: "status-badge status-complete", text: "Installed" });
+  else if (connected) action = el("span", { class: "muted", text: "Install through Sparrow Studio" });
+  else if (row.downloadable) action = el("button", { type: "button", class: "btn btn-lite compact", "data-catalog-download": String(row.id), text: "Download" });
+  else if (row.source_url) action = el("a", { href: row.source_url, target: "_blank", rel: "noopener", text: "Get it from the source" });
+  else action = el("span", { class: "muted", text: "Not available to download" });
+  return el("div", { class: "catalog-row", "data-catalog-id": String(row.id) },
+    el("div", { class: "catalog-main" },
+      el("strong", { text: row.name || String(row.id) }),
+      el("small", { class: "muted", text: facts }),
+    ),
+    el("div", { class: "catalog-tag" },
+      el("span", { class: `finetune-tag ${yes ? "finetune-yes" : "finetune-no"}`, text: tag }),
+      ...(row.finetune_reason ? [el("small", { class: "muted", text: row.finetune_reason })] : []),
+    ),
+    el("div", { class: "catalog-action" }, action),
+  );
+}
+
+async function downloadCatalogModel(button) {
+  const id = button.dataset.catalogDownload;
+  const row = ((state.catalog && state.catalog.models) || []).find((r) => String(r.id) === id) || {};
+  const ok = await chooseDialog(
+    `Download ${row.name || id}?`,
+    `Installs only this model into the shared Sparrow Engine model folder on this server, so every user of this service sees it.${row.license ? ` Licence: ${row.license}.` : ""} ${row.finetune_tag === FINETUNE_YES ? "It can be fine-tuned." : "It can run, but it cannot be fine-tuned here."}`,
+    [{ value: "download", label: "Download this model" }],
+  );
+  if (ok !== "download") return;
+  await withBusy(`Downloading ${row.name || id}…`, button, () => api("POST", `/v1/catalog/models/${encodeURIComponent(id)}/download`));
+  toast(`${row.name || id} is installed`);
+  await loadCatalog();
 }
 
 // Detector metrics carry one flat key per class ("precision.zebra"); the per-class table shows them.
@@ -2828,6 +3584,7 @@ async function boot() {
   ]);
   state.pipelines = pipelines.pipelines;
   state.studio = studio;
+  $("#browse-catalog").textContent = studio.configured ? "Browse Studio models" : "Browse Model Zoo";
   await loadStockModels();
   $("#studio-panel").hidden = !studio.configured;
   $("#studio-scope-panel").hidden = !studio.configured;
@@ -2843,7 +3600,13 @@ async function boot() {
     ? (await api("GET", "/v1/workspaces")).workspaces.find((w) => w.studio_project === launch.project)
     : null;
   await loadWorkspaces(linked ? linked.id : undefined);
-  showPage(state.page === "login" ? "data" : state.page);
+  if (!launch.project && location.hash === "#catalog-title") {
+    await showPage("models");
+    $("#catalog-title").focus();
+    $("#catalog-title").scrollIntoView();
+  } else {
+    showPage(state.page === "login" ? "data" : state.page);
+  }
   if (launch.load) {
     $("#studio-uptodate").hidden = true;
     toast("Loading the Studio project's data…");
@@ -2905,6 +3668,7 @@ function bind() {
   $("#new-dataset-task").addEventListener("change", renderNewDatasetOptions);
   $("#assist-speciesnet").addEventListener("change", onAssistModelChange);
   $("#pipeline-select").addEventListener("change", renderPipelineSummary);
+  $("#pipeline-select").addEventListener("change", renderSnapshotFeatures);
   $("#upload-btn").addEventListener("click", guarded(() => pickFile("#upload-files")));
   $("#upload-files").addEventListener("change", guarded(uploadImages));
   $("#import-annotations-btn").addEventListener("click", guarded(() => pickFile("#annotations-file")));
@@ -2937,6 +3701,8 @@ function bind() {
   $("#studio-import-btn").addEventListener("click", guarded(studioImport));
   $("#studio-reviewed-only").addEventListener("change", refreshStudioStatus);
   $("#studio-model-clear").addEventListener("click", clearBaseModel);
+  $("#model-arch").addEventListener("change", renderBaseModel);
+  $("#feature-prep-retry").addEventListener("click", guarded(retryFeaturePrep));
   $("#studio-projects-refresh").addEventListener("click", guarded(async () => {
     await loadStudioProjects();
     // Reload also picks up models pushed to the chosen project since it was listed.
@@ -2960,7 +3726,18 @@ function bind() {
     if (e.key === "ArrowRight") { e.preventDefault(); showViewerItem(viewer.index + 1); }
   });
   viewerDlg.addEventListener("click", (e) => { if (e.target === viewerDlg) viewerDlg.close(); });
-  $("#create-snapshot").addEventListener("click", guarded(createSnapshot));
+  $("#create-snapshot").addEventListener("click", guarded(() => createSnapshot()));
+  $("#crop-prep-assist").addEventListener("click", guarded(cropPrepAssist));
+  $("#crop-prep-draw").addEventListener("click", guarded(cropPrepDraw));
+  $("#crop-prep-exclude").addEventListener("click", guarded(cropPrepExclude));
+  $("#crop-prep-show-all").addEventListener("click", guarded(cropPrepShowAll));
+  $("#parent-model-select").addEventListener("change", guarded(chooseParentModel));
+  $("#model-reuse").addEventListener("click", guarded(reuseModelFromDetail));
+  $("#catalog-refresh").addEventListener("click", guarded(loadCatalog));
+  $("#catalog-list").addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-catalog-download]");
+    if (btn) guarded(() => downloadCatalogModel(btn))();
+  });
   $("#start-training").addEventListener("click", guarded(startTraining));
   $("#job-history").addEventListener("click", guarded(async (e) => {
     const row = e.target.closest("[data-job-id]");

@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import uuid
 import re
 import shutil
 import zipfile
@@ -640,7 +641,7 @@ def fetch_megadetector(
         emit(
             f"downloading {spec['name']} weights ({spec['size'] / 1e6:.0f} MB) from Zenodo"
         )
-    tmp = path.with_name(f".{spec['file']}.{os.getpid()}.part")
+    tmp = path.with_name(f".{spec['file']}.{uuid.uuid4().hex}.part")
     url = MEGADETECTOR_URL.format(file=spec["file"])
     for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
         try:

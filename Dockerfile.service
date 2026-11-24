@@ -36,7 +36,7 @@ WORKDIR /app
 # Dependencies first (cached unless the lock changes), project source second.
 COPY pyproject.toml uv.lock README.md requirements-cpu.txt ./
 RUN case "$TORCH_VARIANT" in \
-      cu128) uv sync --frozen --no-dev --extra export --no-install-project ;; \
+      cu128) uv sync --frozen --no-dev --extra export --extra catalog --no-install-project ;; \
       cpu) uv venv /opt/venv \
            && uv pip install --python /opt/venv/bin/python --torch-backend cpu \
                 --require-hashes -r requirements-cpu.txt ;; \

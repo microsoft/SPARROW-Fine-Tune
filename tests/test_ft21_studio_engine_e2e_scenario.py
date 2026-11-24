@@ -56,6 +56,25 @@ def _fake_api(e2e, failed: str | None):
             self.activations: list[tuple[str, str]] = []
             self.params: dict[int, dict] = {}
             self.models: list[int] = []
+            self.prep: dict[int, int] = {}  # prepared snapshot id -> polls so far
+            self.dino_snapshots: list[int] = []
+
+        def _features(self, sid: int) -> dict:
+            if sid not in self.prep:
+                return {"state": "not_prepared"}
+            polls = self.prep[sid]
+            done = min(polls, 3)
+            state = "ready" if polls >= 2 else ("running" if polls else "queued")
+            done = 3 if state == "ready" else min(done, 1)
+            return {
+                "state": state,
+                "total": 3,
+                "to_compute": 3,
+                "reused": 0,
+                "done": done,
+                "job_id": 900 + sid,
+                "message": "Preparing DINO features",
+            }
 
         def call(self, method, path, body=None, raw=None, timeout=900):
             url = urlsplit(path)
@@ -87,13 +106,32 @@ def _fake_api(e2e, failed: str | None):
             if method == "POST" and parts == ["connectors", "studio", "import"]:
                 return 200, {"imported_images": 3, "imported_items": 3, "skipped": 0}
             if method == "POST" and parts[-1] == "snapshots":
-                return 201, {
+                snap = {
                     "id": int(parts[1]),
                     "label_counts": {"animal": 1}
                     if parts[1] == "3"
                     else {s: 1 for s in e2e.SPECIES},
                 }
+                if (body or {}).get("prepare_features"):
+                    # DINO Data Preparation: queued work the worker finishes over two polls.
+                    snap["id"] = 100 + int(parts[1])
+                    self.prep[snap["id"]] = 0
+                    snap["features"] = self._features(snap["id"])
+                return 201, snap
+            if method == "GET" and parts[0] == "snapshots" and parts[-1] == "features":
+                sid = int(parts[1])
+                if sid not in self.prep:
+                    return 200, {"state": "not_prepared"}
+                self.prep[sid] += 1
+                return 200, self._features(sid)
             if method == "POST" and parts == ["jobs"]:
+                sid = body["snapshot_id"]
+                if body["pipeline"] == "dinov3_linear" and (
+                    self._features(sid).get("state") != "ready"
+                ):
+                    return 422, {"detail": "Prepare DINO features in Data Preparation"}
+                if body["pipeline"] == "dinov3_linear":
+                    self.dino_snapshots.append(sid)
                 jid = len(self.jobs) + 1
                 self.jobs[jid] = body["pipeline"]
                 self.params[jid] = body.get("params") or {}
@@ -247,3 +285,43 @@ def test_ft21_scenario_continues_past_a_pipeline_without_a_model(e2e, tmp_path, 
         assert not any(ok for _, ok in combination), combination
     else:
         assert combination, names
+
+
+def test_gpu_scenario_prepares_dino_features_before_submitting_dinov3(e2e, tmp_path):
+    """The Studio/GPU runner opts a snapshot into DINO Data Preparation and polls its progress to
+    ``ready`` before submitting ``dinov3_linear``; the fake refuses an unprepared snapshot with 422
+    exactly like the service, so a runner that skips preparation loses its DINO model."""
+    (tmp_path / "models").mkdir()
+    (tmp_path / "studio_models").mkdir()
+    (tmp_path / "studio_models" / "bundle.zip").write_bytes(b"0123456789")
+    args = SimpleNamespace(
+        epochs_cls=1,
+        epochs_det=1,
+        train_timeout=5,
+        val_main=2,
+        val_small=1,
+        min_acc=0.0,
+        min_det_acc=0.0,
+    )
+    info = {
+        "projects": {"train": 1, "base": 2, "stock_gate": 3, "base_pipeline": 1},
+        "reviewed_train_images": 3,
+        "baseline": {"accuracy": 0.0, "detected": 0.0, "per_class": {}},
+    }
+    e2e.CHECKS.clear()
+    api = _fake_api(e2e, None)
+    try:
+        e2e.scenario(args, FakeStudio(), api, info, tmp_path, [("img", "Bos")] * 20, {})
+        checks = list(e2e.CHECKS)
+    finally:
+        e2e.CHECKS.clear()
+
+    assert api.dino_snapshots, "dinov3_linear was never submitted"
+    for sid in api.dino_snapshots:
+        assert sid in api.prep, f"dinov3_linear submitted on unprepared snapshot {sid}"
+        assert api.prep[sid] >= 2, "submitted before progress reached ready"
+    prep = [(n, ok) for n, ok, _ in checks if "DINO" in n or "features" in n]
+    assert prep and all(ok for _, ok in prep), prep
+    assert any(
+        "dinov3_linear trains on real data" in n and ok for n, ok, _ in checks
+    ), [n for n, _, _ in checks]

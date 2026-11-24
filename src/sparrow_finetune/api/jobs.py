@@ -16,7 +16,8 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from ..base_models import check_base_model
+from ..base_models import check_base_model, check_parent_model, reuse_preview, tag_model
+from .. import features as features_mod
 from ..db import connect
 from ..jobs import TERMINAL_STATES, AlreadyRetried, JobQueue
 from ..jsonsafe import find_non_finite, sanitise_non_finite
@@ -90,6 +91,8 @@ def list_stock_models(request: Request):
 @router.post("/jobs", status_code=201)
 def submit_job(body: JobIn, request: Request):
     trainer = request.app.state.registry.get(body.pipeline)
+    if trainer is not None and getattr(trainer, "internal", False):
+        trainer = None  # Data Preparation is queued by snapshots, never submitted directly
     if trainer is None:
         if body.pipeline in PLANNED_PIPELINES:
             raise HTTPException(
@@ -109,6 +112,21 @@ def submit_job(body: JobIn, request: Request):
             f"pipeline {trainer.id!r} trains {trainer.task} models but snapshot "
             f"{body.snapshot_id} is a {snap['task']} dataset",
         )
+    if trainer.id == "dinov3_linear":
+        with connect(request.app.state.settings.database_url) as conn:
+            row = conn.execute(
+                "SELECT features FROM snapshots WHERE id = %s", (body.snapshot_id,)
+            ).fetchone()
+            prepared = features_mod.snapshot_state(
+                conn, request.app.state.settings.data_dir, body.snapshot_id, row["features"]
+            )
+        if prepared["state"] != "ready":
+            raise HTTPException(
+                422,
+                f"dinov3_linear trains on prepared DINO features, but snapshot "
+                f"{body.snapshot_id} is {prepared['state']}: create the snapshot with Data "
+                "Preparation (prepare_features) and wait until it is ready",
+            )
     bad = find_non_finite(body.params)
     if bad is not None:
         raise HTTPException(
@@ -123,6 +141,10 @@ def submit_job(body: JobIn, request: Request):
         raise HTTPException(
             422, f"invalid params: {bad} is not a finite number (NaN/Infinity)"
         )
+    # An omitted ``model`` follows the base/parent architecture instead of the pipeline default;
+    # an explicit one must match it.
+    adopt_arch = trainer.id == "conventional_classifier" and "model" not in body.params
+    start_arch = None
     if params.get("base_model_id") is not None:
         if not trainer.supports_base_model:
             raise HTTPException(
@@ -131,13 +153,37 @@ def submit_job(body: JobIn, request: Request):
                 "(this pipeline cannot warm-start from a base model)",
             )
         try:
-            check_base_model(
+            row = check_base_model(
                 request.app.state.settings.database_url,
                 params["base_model_id"],
                 trainer.id,
-                params.get("model"),
+                None if adopt_arch else params.get("model"),
             )
         except ValueError as exc:
+            raise HTTPException(422, f"invalid params: {exc}") from exc
+        start_arch = row["model_arch"]
+    if params.get("parent_model_id") is not None:
+        if not trainer.supports_base_model:
+            raise HTTPException(
+                422,
+                f"invalid params: parent_model_id is not supported by {trainer.id} "
+                "(this pipeline cannot start from a finished model)",
+            )
+        try:
+            row = check_parent_model(
+                request.app.state.settings,
+                params["parent_model_id"],
+                trainer.id,
+                {k: v for k, v in params.items() if k != "model"} if adopt_arch else params,
+                body.snapshot_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, f"invalid params: {exc}") from exc
+        start_arch = row.get("model_arch")
+    if adopt_arch and start_arch and start_arch != params.get("model"):
+        try:
+            params = trainer.validate_params({**body.params, "model": start_arch})
+        except (ValueError, OverflowError) as exc:
             raise HTTPException(422, f"invalid params: {exc}") from exc
     job = _queue(request).enqueue(
         trainer.id,
@@ -364,14 +410,17 @@ def list_models(
     columns = ", ".join(f"j.{c.strip()}" for c in _MODEL_COLUMNS.split(","))
     with connect(request.app.state.settings.database_url) as conn:
         rows = conn.execute(
-            f"SELECT {columns}, d.id AS dataset_id, d.name AS dataset_name, d.workspace_id"
+            f"SELECT {columns}, j.object_key, d.id AS dataset_id, d.name AS dataset_name, d.workspace_id"
             f" FROM model_versions j {_DATASET_JOIN}"
             " WHERE (%s::bigint IS NULL OR j.job_id = %s)"
             " AND (%s::bigint IS NULL OR d.workspace_id = %s) ORDER BY j.id",
             (job_id, job_id, workspace_id, workspace_id),
         ).fetchall()
         active = _active_deployments(conn)
+    objects_dir = request.app.state.settings.objects_dir
     for row in rows:
+        tag_model(objects_dir, row)
+        row.pop("object_key", None)
         row["active_deployments"] = active.get(row["id"], [])
         row["stock_comparison"] = stock_comparison(row["metrics"], row["metadata"])
         row["reference_comparison"] = reference_comparison(row["metrics"])
@@ -408,7 +457,9 @@ def _model_or_404(request: Request, model_id: int, columns: str) -> dict:
 
 @router.get("/models/{model_id}")
 def get_model(model_id: int, request: Request):
-    row = _model_or_404(request, model_id, _MODEL_COLUMNS)
+    row = _model_or_404(request, model_id, f"{_MODEL_COLUMNS}, object_key")
+    tag_model(request.app.state.settings.objects_dir, row)
+    row.pop("object_key", None)
     with connect(request.app.state.settings.database_url) as conn:
         row["active_deployments"] = _active_deployments(conn, model_id).get(
             model_id, []
@@ -416,6 +467,18 @@ def get_model(model_id: int, request: Request):
     row["stock_comparison"] = stock_comparison(row["metrics"], row["metadata"])
     row["reference_comparison"] = reference_comparison(row["metrics"])
     return row
+
+
+@router.get("/models/{model_id}/reuse")
+def preview_reuse(model_id: int, snapshot_id: int, request: Request):
+    """What a job on ``snapshot_id`` with ``parent_model_id=model_id`` would reuse."""
+    try:
+        preview = reuse_preview(request.app.state.settings, model_id, snapshot_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if preview is None:
+        raise HTTPException(404, f"model {model_id} not found")
+    return preview
 
 
 class ModelPatch(BaseModel):

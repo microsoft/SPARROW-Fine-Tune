@@ -12,8 +12,8 @@ cd "$(dirname "$0")/.."
 uv pip compile pyproject.toml \
     <(uv run --no-project --python 3.12 python -c \
         'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"]))') \
-    --extra export --no-sources --torch-backend cpu \
+    --extra export --extra catalog --no-sources --torch-backend cpu \
     --python-version 3.12 --python-platform x86_64-manylinux_2_28 --generate-hashes \
     --no-header --no-annotate -q -o requirements-cpu.txt \
-    -c <(uv export --frozen --no-dev --extra export --no-hashes --no-emit-project --no-header -q \
+    -c <(uv export --frozen --no-dev --extra export --extra catalog --no-hashes --no-emit-project --no-header -q \
         | grep -v '^ *#' | sed -E 's/\+cu128//' | grep '==')

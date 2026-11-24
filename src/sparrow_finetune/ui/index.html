@@ -203,7 +203,7 @@
                       <option value="voc">Pascal VOC (.zip, boxes only)</option>
                       <option value="sparrow">Sparrow JSON (.json)</option>
                     </select>
-                    <input type="file" id="annotations-file" accept=".zip,application/zip" hidden>
+                    <input type="file" id="annotations-file" hidden>
                     <button class="btn btn-lite compact" type="button" id="import-annotations-btn">Import labels</button>
                     <a class="btn btn-lite compact" id="export-annotations" href="#" download>Export</a>
                     <span class="upload-status" id="annotations-status" aria-live="polite"></span>
@@ -304,7 +304,43 @@
                   <p class="muted" id="snapshot-info">No snapshot yet.</p>
                   <div class="class-balance" id="class-balance"></div>
                   <a class="btn btn-lite full" id="snapshot-export" href="#" download hidden>Download snapshot</a>
+                  <section class="crop-prep" id="crop-prep" aria-labelledby="crop-prep-title" hidden>
+                    <h3 id="crop-prep-title">Crops for the classifier</h3>
+                    <p class="help-text" id="crop-prep-summary" aria-live="polite"></p>
+                    <div id="crop-prep-needs" hidden>
+                      <p class="crop-prep-warning" id="crop-prep-needs-text"></p>
+                      <ul class="crop-prep-list" id="crop-prep-list"></ul>
+                      <p class="help-text">Choose what happens to these images before the snapshot. Boxes you already drew or reviewed are kept; only the images listed here are touched.</p>
+                      <label class="crop-prep-detector">Detector for the missing images
+                        <select id="crop-prep-detector"><option value="">Loading detectors…</option></select>
+                      </label>
+                      <div class="crop-prep-actions">
+                        <button class="btn btn-lite compact" type="button" id="crop-prep-assist">Pre-draw boxes on these images only</button>
+                        <button class="btn btn-lite compact" type="button" id="crop-prep-draw">Show them so I can draw boxes</button>
+                        <button class="btn btn-lite compact" type="button" id="crop-prep-exclude">Leave them out of the snapshot</button>
+                      </div>
+                      <p class="upload-status" id="crop-prep-status" aria-live="polite"></p>
+                    </div>
+                    <button class="btn btn-lite compact" type="button" id="crop-prep-show-all" hidden>Show all images</button>
+                  </section>
+                  <section class="feature-prep" id="feature-prep" aria-labelledby="feature-prep-title" hidden>
+                    <h3 id="feature-prep-title">DINO features (optional)</h3>
+                    <p class="help-text" id="feature-prep-summary" aria-live="polite"></p>
+                    <ul class="feature-prep-list" id="feature-prep-items" aria-label="DINO feature cache per crop"></ul>
+                    <label class="check-inline"><input type="checkbox" id="prepare-features"> Prepare DINO features with this snapshot</label>
+                    <p class="help-text">Off by default. When ticked, the DINO image encoder runs once over this snapshot's crops so DINO training can use cached features. Crops already cached are reused. Snapshots made without this option are never prepared.</p>
+                  </section>
                   <button class="btn full" id="create-snapshot" type="button">Create immutable snapshot</button>
+                  <div class="feature-prep-status" id="feature-prep-status" role="status" aria-live="polite" hidden>
+                    <p class="feature-prep-status-text" id="feature-prep-status-text"></p>
+                    <progress id="feature-prep-progress" max="1" aria-label="DINO feature preparation progress"></progress>
+                    <button class="btn btn-lite compact" type="button" id="feature-prep-retry" hidden>Retry DINO preparation</button>
+                  </div>
+                  <div class="base-model-field" id="model-arch-field" hidden>
+                    <label class="base-model-title" for="model-arch">Architecture (ImageNet starting weights)</label>
+                    <select id="model-arch"></select>
+                    <p class="help-text" id="model-arch-help">A first model starts from weights pretrained on ImageNet, a large general photo collection. A finished model chosen below sets its own architecture.</p>
+                  </div>
                   <div class="base-model-field" id="start-weights-field" hidden>
                     <label class="base-model-title" for="start-weights">Starting weights</label>
                     <select id="start-weights">
@@ -317,6 +353,12 @@
                   <div class="base-model-field" id="base-model-field" hidden>
                     <span class="base-model-title">Base model (starting weights)</span>
                     <div class="base-model-info" id="base-model-info" aria-live="polite"></div>
+                    <div class="parent-model-block" id="parent-model-block" hidden>
+                      <label class="base-model-title" for="parent-model-select">Retrain a finished model on this snapshot</label>
+                      <p class="help-text">Start from a model trained here, using the snapshot chosen above. The finished model is never changed; training makes a new version that records which model it started from.</p>
+                      <select id="parent-model-select"><option value="">No finished model selected</option></select>
+                      <div class="reuse-preview" id="reuse-preview" aria-live="polite" hidden></div>
+                    </div>
                   </div>
                   <details class="training-settings" id="training-settings" hidden>
                   <summary>Training settings (optional)</summary>
@@ -475,6 +517,7 @@
               <div>
                 <p class="breadcrumb">Model fine-tuning</p>
                 <h1 id="models-title">Compare and activate models</h1>
+                <a class="btn btn-lite compact" id="browse-catalog" href="#catalog-title">Browse Model Zoo</a>
                 <p>Every model version is immutable. Compare versions, then choose which one a project uses.</p>
                 <p class="scope-note" id="models-scope"></p>
               </div>
@@ -489,6 +532,7 @@
                       <span class="status-badge status-complete" id="model-active-badge" hidden>Active</span>
                     </div>
                     <h2 id="model-name">-</h2>
+                    <p class="model-finetune" id="model-finetune" hidden></p>
                     <p id="model-description"></p>
                     <button class="btn btn-lite compact" type="button" id="show-rename-model">Rename</button>
                     <form class="scope-create" id="rename-model-form" hidden>
@@ -506,6 +550,7 @@
                     <label class="muted" id="studio-detector-label" hidden>Detector <select id="studio-detector"><option value="">Current detector</option></select></label>
                     <button class="btn btn-lite" id="activate-studio" type="button" hidden>Activate in Studio</button>
                     <a class="btn btn-lite" id="model-download" href="#" download>Download artifact</a>
+                    <button class="btn btn-lite" id="model-reuse" type="button" hidden>Use as base for new training</button>
                   </div>
                 </section>
                 <p class="stock-comparison" id="studio-detector-note" role="note" hidden></p>
@@ -538,6 +583,19 @@
               </div>
               <p class="empty-note" id="model-empty">No models yet. A model appears when a training job succeeds.</p>
             </div>
+            <section class="section-card catalog-section" id="catalog-section" aria-labelledby="catalog-title">
+              <div class="section-head">
+                <div>
+                  <h2 id="catalog-title" tabindex="-1">Model catalogue</h2>
+                  <p id="catalog-mode-note">Models you can get, and whether each can be fine-tuned here. Nothing is downloaded until you choose one model.</p>
+                </div>
+                <button class="btn btn-lite compact" type="button" id="catalog-refresh">Refresh</button>
+              </div>
+              <p class="help-text" id="catalog-privacy">On a shared install your images, labels and models stay on this service. Nothing is uploaded to the model zoo. Zoo models are for browsing, downloading and running; a first fine-tune starts from ImageNet weights chosen on the Data page, and later ones can start from a model you trained here.</p>
+              <p class="catalog-error" id="catalog-error" role="status" hidden></p>
+              <div class="catalog-list" id="catalog-list" aria-live="polite"></div>
+              <p class="upload-status" id="catalog-status" aria-live="polite"></p>
+            </section>
           </div>
         </article>
       </section>

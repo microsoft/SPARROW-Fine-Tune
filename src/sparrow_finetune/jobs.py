@@ -446,6 +446,21 @@ class JobQueue:
             ).fetchone()
         return row["id"]
 
+    def complete_without_model(
+        self, job_id: int, worker_id: str, attempt: Optional[int] = None
+    ) -> None:
+        """Mark a job that produces no model (Data Preparation) succeeded."""
+        with connect(self.database_url) as conn:
+            self._finish(
+                conn,
+                job_id,
+                worker_id,
+                "succeeded",
+                None,
+                attempt,
+                refuse_if_cancelled=True,
+            )
+
     def fail(
         self, job_id: int, worker_id: str, error: str, attempt: Optional[int] = None
     ) -> None:

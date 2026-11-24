@@ -820,13 +820,15 @@ def test_ft17_malformed_embedder_spec_fails_before_any_crop_is_read(
     assert not opened
 
 
-def test_ft17_dinov3_prepare_comment_is_accurate():
-    src = (
-        Path(__file__).resolve().parents[2]
-        / "src/sparrow_finetune/pipelines/dinov3_linear.py"
-    ).read_text()
-    assert "fails the job at once" not in src
-    assert "unavailable_reason" in src
+def test_missing_encoder_is_reported_in_data_preparation(client):
+    from .helpers import create_dataset, create_workspace
+
+    workspace = create_workspace(client)
+    dataset = create_dataset(client, workspace["id"], task="classification")
+    response = client.get(f"/v1/datasets/{dataset['id']}/feature-prep")
+    assert response.status_code == 200
+    assert response.json()["available"] is False
+    assert "encoder" in response.json()["message"].lower()
 
 
 def test_card_values_are_json_numbers(dino_dup_run):

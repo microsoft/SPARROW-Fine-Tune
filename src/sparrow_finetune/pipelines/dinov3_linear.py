@@ -129,6 +129,21 @@ def _reference_macro_f1(
     )
 
 
+class _PreparedEncoder:
+    """Stands in for the embedder when training reads prepared features: identity only."""
+
+    def __init__(self, prepared: dict) -> None:
+        self.vectors = np.asarray(prepared["vectors"], dtype=np.float32)
+        emb = prepared["embedder"]
+        self.id = emb["id"]
+        self.model_hash = emb["model_hash"]
+        self.dim = int(emb["dim"])
+        inp = prepared.get("input") or {}
+        self.input_size = inp.get("size")
+        self.mean = tuple(inp.get("mean") or ())
+        self.std = tuple(inp.get("std") or ())
+
+
 def crop_box(bbox, width: int, height: int) -> tuple[int, int, int, int]:
     """Pixel ``[x, y, w, h]`` (or ``None`` for the whole image) -> clamped ``(left, top, right, bottom)``."""
     if bbox is None:
@@ -348,6 +363,18 @@ class DinoV3LinearTrainer(Trainer):
                 f"parameter base_model_id must be a positive integer (an imported base model id), "
                 f"got {base_model_id!r}"
             )
+        parent_model_id = params.pop("parent_model_id", None)
+        if parent_model_id is not None and (
+            not isinstance(parent_model_id, int)
+            or isinstance(parent_model_id, bool)
+            or parent_model_id < 1
+        ):
+            raise ValueError(
+                f"parameter parent_model_id must be a positive integer (a finished model id), "
+                f"got {parent_model_id!r}"
+            )
+        if base_model_id is not None and parent_model_id is not None:
+            raise ValueError("set base_model_id or parent_model_id, not both")
         unknown = sorted(set(params) - set(_PARAMS))
         if unknown:
             raise ValueError(f"unknown parameter(s): {', '.join(unknown)}")
@@ -385,14 +412,20 @@ class DinoV3LinearTrainer(Trainer):
             )
         if base_model_id is not None:
             out["base_model_id"] = base_model_id
+        if parent_model_id is not None:
+            out["parent_model_id"] = parent_model_id
         return out
 
     # ------------------------------------------------------------------ prepare
 
     def prepare(self, ctx: JobContext) -> None:
-        # Built before any crop is read, so a malformed SPARROW_FT_EMBEDDER or a missing embedder
-        # model fails the job without wasted work. A worker whose SPARROW_FT_EMBEDDER is unset never
-        # claims this pipeline (register_builtin_pipelines sets ``unavailable_reason``).
+        # A service job trains on the snapshot's prepared features (Data Preparation): the worker
+        # sets ``ctx.prepared_features`` and the encoder is never loaded here.
+        if ctx.prepared_features is not None:
+            self._prepare(ctx, _PreparedEncoder(ctx.prepared_features))
+            return
+        # Library use without prepared features: the embedder is built before any crop is read,
+        # so a malformed SPARROW_FT_EMBEDDER or a missing model fails without wasted work.
         embedder = self._embedder_factory()
         try:
             self._prepare(ctx, embedder)
@@ -454,26 +487,31 @@ class DinoV3LinearTrainer(Trainer):
                 "the test split is empty: add more images or groups, or raise test_fraction"
             )
 
-        cache = (
-            self._open_cache(ctx, embedder)
-            if params.get("embedding_cache", True)
-            else None
-        )
-        features, hashes = self._extract(ctx, embedder, cache)
-        if cache is not None and features is None:
-            # Cached and freshly computed vectors disagree on the dimension (an embedder whose
-            # output changed without a new id or model hash): recompute everything uncached.
-            ctx.emit(
-                "prepare",
-                "embedding cache dimension mismatch: recomputing without the cache",
-                fingerprint=cache.fingerprint,
-            )
-            stats = cache.stats()
-            cache = None
-            features, hashes = self._extract(ctx, embedder, None)
-            cache_stats = dict(stats, enabled=False, reason="dimension mismatch")
+        if isinstance(embedder, _PreparedEncoder):
+            features = embedder.vectors
+            hashes = self._dhashes(ctx)
+            cache_stats = {"enabled": False, "reason": "prepared features"}
         else:
-            cache_stats = cache.stats() if cache is not None else {"enabled": False}
+            cache = (
+                self._open_cache(ctx, embedder)
+                if params.get("embedding_cache", True)
+                else None
+            )
+            features, hashes = self._extract(ctx, embedder, cache)
+            if cache is not None and features is None:
+                # Cached and freshly computed vectors disagree on the dimension (an embedder whose
+                # output changed without a new id or model hash): recompute everything uncached.
+                ctx.emit(
+                    "prepare",
+                    "embedding cache dimension mismatch: recomputing without the cache",
+                    fingerprint=cache.fingerprint,
+                )
+                stats = cache.stats()
+                cache = None
+                features, hashes = self._extract(ctx, embedder, None)
+                cache_stats = dict(stats, enabled=False, reason="dimension mismatch")
+            else:
+                cache_stats = cache.stats() if cache is not None else {"enabled": False}
         n_crops = len(labels)
         if features.shape[0] != n_crops:
             raise RuntimeError(
@@ -518,7 +556,8 @@ class DinoV3LinearTrainer(Trainer):
                 in ("enabled", "hits", "misses", "corrupt", "writes", "write_errors")
             },
         )
-        ctx.emit("prepare", "features extracted", crops=n_crops, dim=dim)
+        ctx.emit("prepare", "prepared features loaded" if isinstance(embedder, _PreparedEncoder)
+                 else "features extracted", crops=n_crops, dim=dim)
 
     @staticmethod
     def _stage_base_head(ctx: JobContext, embedder: Embedder) -> None:
@@ -542,10 +581,14 @@ class DinoV3LinearTrainer(Trainer):
         base_embedder = manifest.get("embedder") or {}
         if base_embedder.get("model_hash") != embedder.model_hash:
             raise ValueError(
-                f"base model {base['id']} was trained on embedder {base_embedder.get('id')!r} "
-                f"(model hash {base_embedder.get('model_hash')!r}), but this worker embeds with "
-                f"{embedder.id!r} (model hash {embedder.model_hash!r}); its head cannot be reused"
+                f"{base.get('kind', 'base')} model {base['id']} was trained on encoder "
+                f"{base_embedder.get('id')!r} (model hash {base_embedder.get('model_hash')!r}), "
+                f"but this worker embeds with {embedder.id!r} (model hash "
+                f"{embedder.model_hash!r}); a different encoder means its head cannot be reused"
             )
+        base_size = (manifest.get("input") or {}).get("size")
+        if base_size is not None and base_size != getattr(embedder, "input_size", None):
+            raise ValueError(f"base model {base['id']} was prepared with a different encoder input size")
         workdir = Path(ctx.workdir)
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "base_head.pt").write_bytes(data)
@@ -590,7 +633,7 @@ class DinoV3LinearTrainer(Trainer):
         )
         ctx.emit(
             "train",
-            f"warm start from base model {base['id']}: {detail}",
+            f"warm start from {base.get('kind', 'base')} model {base['id']}: {detail}",
             base_model_id=base["id"],
             reused_labels=len(shared),
         )
@@ -622,6 +665,20 @@ class DinoV3LinearTrainer(Trainer):
             )
             return None
         return EmbeddingCache(root, embedder_fingerprint(embedder))
+
+    @staticmethod
+    def _dhashes(ctx: JobContext) -> list[int]:
+        """dHashes of the crops in snapshot order (no encoder: used with prepared features)."""
+        hashes: list[int] = []
+        for item in ctx.items:
+            if not item.annotations:
+                continue
+            with Image.open(item.image_path) as im:
+                im = im.convert("RGB")
+                for ann in item.annotations:
+                    hashes.append(dhash(im.crop(crop_box(ann.get("bbox"), im.width, im.height))))
+            ctx.check_cancelled()
+        return hashes
 
     @staticmethod
     def _extract(
@@ -763,6 +820,16 @@ class DinoV3LinearTrainer(Trainer):
                 np.asarray(scaler.scale_ if scaler else np.ones(dim), dtype=np.float64),
                 classes,
                 xs_fit.dtype,
+            )
+        else:
+            dim = xs_fit.shape[1]
+            rows = 1 if len(classes) == 2 else len(classes)
+            clf._allocate_parameter_mem(
+                n_classes=len(classes),
+                n_features=dim,
+                input_dtype=xs_fit.dtype,
+                coef_init=rng.normal(0.0, 0.01 / np.sqrt(dim), (rows, dim)).astype(xs_fit.dtype),
+                intercept_init=np.zeros(rows, dtype=xs_fit.dtype),
             )
 
         best_f1, best_epoch, best_clf = -1.0, 0, None
@@ -1082,4 +1149,6 @@ class DinoV3LinearTrainer(Trainer):
             metadata["stock_model"] = stock["id"]
         if ctx.params.get("base_model_id") is not None:
             metadata["base_model_id"] = ctx.params["base_model_id"]
+        if ctx.params.get("parent_model_id") is not None:
+            metadata["parent_model_id"] = ctx.params["parent_model_id"]
         return ExportResult(path=path, format="onnx-bundle", metadata=metadata)

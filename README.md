@@ -9,7 +9,7 @@ next to Sparrow Studio, which opens it from its
 | Pipeline | Task | Where it trains |
 |---|---|---|
 | `dinov3_linear` — DINOv3 linear probe | classification on detector crops | CPU (needs an embedder) |
-| `conventional_classifier` — timm fine-tune (ResNet-50 by default) | classification on crops or whole images | GPU recommended |
+| `conventional_classifier` — fine-tune of a timm (PyTorch Image Models) classifier: `resnet50` by default, or the architecture of a base package or finished model | classification on crops or whole images | GPU recommended |
 | `yolo_detector` — YOLO11 object detector | detection | GPU recommended |
 
 The service is a FastAPI app, a PostgreSQL database, and one or more workers that claim

@@ -10,6 +10,11 @@ Jobs: ``conventional_classifier`` (device auto, stock_model AI4G-Amazon-V2), ``d
 (ONNX embedder) and ``yolo_detector`` (yolo11n, device cpu). Each must succeed, record a CPU
 device, and ship an ONNX artifact.
 
+DINO features are computed in Data Preparation, not in training: the runner opts a snapshot into
+preparation and polls its progress to ``ready`` before submitting ``dinov3_linear``. It covers all
+crops new, then mixed (crops added later are the only work), then zero work after training, and
+checks that training left the real ONNX encoder and every prepared vector unchanged.
+
 Usage (from the repo root; build the image first with
 ``docker build -f Dockerfile.service --build-arg TORCH_VARIANT=cpu -t sparrow-finetune:cpu .``):
 
@@ -25,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import os
@@ -40,10 +46,77 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from studio_branch_e2e import CHECKS, REPO, check, free_port, scene  # noqa: E402
-from studio_full_e2e import Api, job_seconds, wait_job  # noqa: E402
+from studio_full_e2e import (  # noqa: E402
+    Api,
+    job_seconds,
+    prepare_dino_snapshot,
+    wait_job,
+)
 
 SPECIES = ("Dasyprocta", "Bos", "Pecari", "Mazama", "Cuniculus")
 STOCK = "AI4G-Amazon-V2"
+ENCODER = "dinov3_vits16.onnx"
+
+
+def split_new_crops(items: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Hold back one crop per species: they arrive after the first preparation (mixed work)."""
+    held, seen = [], set()
+    for it in reversed(items):
+        label = it["annotations"][0]["label"]
+        if label not in seen:
+            seen.add(label)
+            held.append(it)
+    first = [it for it in items if it not in held]
+    return first, list(reversed(held))
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def dino_training_left_features_alone(
+    api: Api, ds: int, model: dict, encoder: Path, encoder_sha: str, timeout_s: int
+) -> None:
+    """After a ``dinov3_linear`` job: training read the prepared vectors and changed nothing.
+
+    The real ONNX encoder file is byte-identical, the bundle records exactly that encoder, every
+    crop is still ``valid`` and a further opt-in snapshot has zero work.
+    """
+    check(
+        "dinov3_linear: training left the ONNX encoder unchanged",
+        sha256_file(encoder) == encoder_sha,
+        encoder_sha[:16],
+    )
+    status, data = api.call("GET", f"/models/{model['id']}/artifact")
+    manifest = {}
+    if status == 200 and isinstance(data, bytes):
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for n in zf.namelist():
+                if Path(n).name == "manifest.json":
+                    manifest = json.loads(zf.read(n))
+    got = (manifest.get("embedder") or {}).get("model_hash")
+    check(
+        "dinov3_linear: bundle records the encoder that prepared its features",
+        got == encoder_sha,
+        f"manifest={got} encoder={encoder_sha}",
+    )
+    prep = api.ok("GET", f"/datasets/{ds}/feature-prep")
+    counts = prep.get("counts") or {}
+    check(
+        "dinov3_linear: every crop is still valid after training",
+        prep.get("to_compute") == 0
+        and counts.get("valid") == counts.get("total") == len(prep.get("items") or [])
+        and counts.get("total", 0) > 0,
+        json.dumps(counts),
+    )
+    prepare_dino_snapshot(
+        api,
+        ds,
+        timeout_s,
+        "dinov3_linear after training",
+        expect_new=0,
+        expect_reused=counts.get("total"),
+    )
 
 
 def compose(project: str, files: list[Path], env: dict, *args, check_rc=True):
@@ -87,9 +160,9 @@ def pick_crops(amazon: Path, per_class: int) -> list[tuple[str, str, str]]:
     return out
 
 
-def write_override(path: Path, weights: Path, assets: Path, yolo_cwd: Path) -> None:
+def write_override(path: Path, weights: Path, assets: Path, yolo_cwd: Path, image: str) -> None:
     worker = {
-        "image": "sparrow-finetune:cpu",
+        "image": image,
         "environment": {"HF_HUB_OFFLINE": "1"},
         "volumes": [
             "ft-data:/data",
@@ -99,7 +172,7 @@ def write_override(path: Path, weights: Path, assets: Path, yolo_cwd: Path) -> N
         ],
         "working_dir": "/yolo",
     }
-    doc = {"services": {"worker-cpu": worker}}
+    doc = {"services": {"api": {"volumes": [f"{assets}:/assets:ro"]}, "worker-cpu": worker}}
     path.write_text(json.dumps(doc, indent=2))
 
 
@@ -132,7 +205,9 @@ def main() -> int:
     ap.add_argument("--assets", type=Path, required=True)
     ap.add_argument("--stock", type=Path, required=True)
     ap.add_argument("--timm-weights", type=Path, required=True)
+    ap.add_argument("--efficientnet-weights", type=Path, help="Cached timm/efficientnet_b0.ra_in1k model.safetensors")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--image-tag", default="cpu", help="tag of the CPU-only image under test")
     ap.add_argument("--per-class", type=int, default=12)
     ap.add_argument("--train-timeout", type=int, default=3600)
     ap.add_argument("--keep", action="store_true", help="leave the stack running")
@@ -144,6 +219,10 @@ def main() -> int:
     weights = work / "weights"
     (weights / "timm/resnet50").mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.timm_weights, weights / "timm/resnet50/model.safetensors")
+    if args.efficientnet_weights:
+        target = weights / "timm/efficientnet_b0/model.safetensors"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(args.efficientnet_weights, target)
     shutil.copytree(args.stock, weights / STOCK, dirs_exist_ok=True)
     yolo_cwd = work / "yolo_cwd"
     yolo_cwd.mkdir(parents=True, exist_ok=True)
@@ -155,7 +234,7 @@ def main() -> int:
     token = secrets.token_urlsafe(24)
     env = {
         "POSTGRES_PASSWORD": secrets.token_urlsafe(16),
-        "SPARROW_FT_IMAGE_TAG": "cpu",
+        "SPARROW_FT_IMAGE_TAG": args.image_tag,
         "TORCH_VARIANT": "cpu",
         "SPARROW_FT_PORT": str(port),
         "SPARROW_FT_API_TOKENS": token,
@@ -164,7 +243,8 @@ def main() -> int:
         "SPARROW_FT_WEIGHTS_DIR": "/weights",
     }
     override = work / "override.json"
-    write_override(override, weights.resolve(), args.assets.resolve(), yolo_cwd)
+    image = f"sparrow-finetune:{args.image_tag}"
+    write_override(override, weights.resolve(), args.assets.resolve(), yolo_cwd, image)
     files = [REPO / "compose.service.yml", override]
     info: dict = {"project": project}
     try:
@@ -181,9 +261,9 @@ def main() -> int:
         ps = compose(project, files, env, "ps", "--format", "{{.Service}} {{.Image}}")
         services = dict(line.split(" ", 1) for line in ps.stdout.split("\n") if line)
         check(
-            "only worker-cpu runs, on sparrow-finetune:cpu",
+            f"only worker-cpu runs, on {image}",
             "worker-gpu" not in services
-            and services.get("worker-cpu") == "sparrow-finetune:cpu",
+            and services.get("worker-cpu") == image,
             json.dumps(services),
         )
         probe = compose(
@@ -215,31 +295,71 @@ def main() -> int:
         cls = api.ok(
             "POST",
             f"/workspaces/{ws}/datasets",
-            {"name": "Amazon crops", "task": "classification"},
+            {"name": "Amazon crops", "task": "classification", "whole_image": True},
         )["id"]
         crops = pick_crops(args.amazon, args.per_class)
         items = []
         for pid, label, group in crops:
-            name = pid.replace("/", "__")
-            api.ok(
-                "PUT",
-                f"/datasets/{cls}/images/{name}",
-                raw=(args.amazon / "cropped_resized" / pid).read_bytes(),
-            )
             items.append(
                 {
-                    "image": name,
+                    "image": pid.replace("/", "__"),
                     "annotations": [{"label": label, "bbox": None}],
                     "group": group,
+                    "_src": args.amazon / "cropped_resized" / pid,
                 }
             )
-        api.ok("POST", f"/datasets/{cls}/annotations", {"items": items})
+
+        def add_crops(batch: list[dict]) -> None:
+            for it in batch:
+                api.ok("PUT", f"/datasets/{cls}/images/{it['image']}", raw=it["_src"].read_bytes())
+            api.ok(
+                "POST",
+                f"/datasets/{cls}/annotations",
+                {"items": [{k: v for k, v in it.items() if k != "_src"} for it in batch]},
+            )
+
+        # DINO Data Preparation with the real ONNX encoder on the CPU worker: every crop is new,
+        # then crops added later are the only work (mixed), then nothing is left (zero work).
+        first, held = split_new_crops(items)
+        add_crops(first)
+        prepare_dino_snapshot(
+            api, cls, args.train_timeout, "DINO prep, all crops new",
+            expect_new=len(first), expect_reused=0,
+        )
+        add_crops(held)
         snap_cls = api.ok("POST", f"/datasets/{cls}/snapshots", {})
         check(
             "classification snapshot from real Amazon crops",
             snap_cls.get("item_count", len(items)) == len(items),
             f"{len(items)} crops, {len(SPECIES)} species",
         )
+        plain_f = api.ok("GET", f"/snapshots/{snap_cls['id']}/features")
+        st, body = api.call(
+            "POST",
+            "/jobs",
+            {"pipeline": "dinov3_linear", "snapshot_id": snap_cls["id"], "params": {}},
+        )
+        check(
+            "snapshot without opt-in is not prepared; dinov3_linear on it -> 422",
+            snap_cls.get("features") is None
+            and plain_f.get("state") == "not_prepared"
+            and st == 422
+            and "Data Preparation" in str(body),
+            f"features={snap_cls.get('features')} state={plain_f.get('state')} {st}",
+        )
+        snap_dino = prepare_dino_snapshot(
+            api, cls, args.train_timeout, "DINO prep, mixed new and prepared crops",
+            expect_new=len(held), expect_reused=len(first),
+        )
+        pipes = {p["id"]: p for p in api.ok("GET", "/pipelines")["pipelines"]}
+        d = pipes.get("dinov3_linear") or {}
+        check(
+            "dinov3_linear: frozen encoder, random head, trained on CPU",
+            (d.get("encoder"), d.get("head"), d.get("device")) == ("frozen", "random", "cpu"),
+            json.dumps({k: d.get(k) for k in ("encoder", "head", "device")}),
+        )
+        encoder = args.assets / ENCODER
+        encoder_sha = sha256_file(encoder)
 
         # Detection: synthetic box scenes.
         det = api.ok(
@@ -279,7 +399,7 @@ def main() -> int:
                     "stock_model": STOCK,
                 },
             ),
-            "dinov3_linear": (snap_cls["id"], {}),
+            "dinov3_linear": (snap_dino["id"], {}),
             "yolo_detector": (
                 snap_det["id"],
                 {
@@ -292,6 +412,17 @@ def main() -> int:
             ),
         }
         ids = {}
+        if args.efficientnet_weights:
+            eff = api.ok("POST", "/jobs", {
+                "pipeline": "conventional_classifier", "snapshot_id": snap_cls["id"],
+                "params": {"model": "efficientnet_b0", "epochs": 2, "warmup_epochs": 1, "batch": 8},
+            })
+            trained = wait_job(api, eff["id"], args.train_timeout)
+            models = api.ok("GET", f"/models?job_id={eff['id']}")["models"]
+            check("EfficientNet-B0 trains offline from ImageNet and exports ONNX",
+                  trained["state"] == "succeeded" and trained["params"]["pretrained"]
+                  and len(models) == 1 and bool(artifact_check(api, models[0], out)[0]),
+                  f"job {eff['id']}: {trained['state']}; {trained.get('error') or ''}")
         for pipeline, (snap, params) in jobs.items():
             st, body = api.call(
                 "POST",
@@ -332,6 +463,10 @@ def main() -> int:
                     f"{pipeline} records a CPU device",
                     bool(devices) and all(d.startswith("cpu") for d in devices),
                     ", ".join(devices) or "no device recorded",
+                )
+            if pipeline == "dinov3_linear":
+                dino_training_left_features_alone(
+                    api, cls, model, encoder, encoder_sha, args.train_timeout
                 )
             if pipeline == "conventional_classifier":
                 sc = model.get("stock_comparison") or {}

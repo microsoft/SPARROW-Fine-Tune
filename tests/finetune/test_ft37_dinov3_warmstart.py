@@ -213,14 +213,14 @@ def test_warm_start_seeds_the_head_with_the_base_scores(tmp_path, monkeypatch):
     assert any("warm start from base model 5" in e[1] for e in rec.events)
 
 
-def test_cold_start_without_base_model_does_not_seed(tmp_path, monkeypatch):
+def test_cold_start_initializes_a_fresh_nonzero_head(tmp_path, monkeypatch):
     from sklearn.linear_model import SGDClassifier
 
     seen = []
     original = SGDClassifier.partial_fit
 
     def spy(self, X, y, classes=None, sample_weight=None):
-        seen.append(getattr(self, "coef_", None) is None)
+        seen.append(self.coef_.copy())
         return original(self, X, y, classes=classes, sample_weight=sample_weight)
 
     monkeypatch.setattr(SGDClassifier, "partial_fit", spy)
@@ -229,7 +229,7 @@ def test_cold_start_without_base_model_does_not_seed(tmp_path, monkeypatch):
     ctx, _ = make_context(trainer, items, tmp_path / "w", FAST)
     trainer.prepare(ctx)
     trainer.train(ctx)
-    assert seen[0] is True
+    assert np.isfinite(seen[0]).all() and np.std(seen[0]) > 0
     assert (
         json.loads((Path(ctx.workdir) / "train.json").read_text())["warm_start"] is None
     )
