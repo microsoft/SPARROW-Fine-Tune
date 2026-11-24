@@ -155,6 +155,7 @@ def test_conventional_v1_to_v2_same_labels_keeps_parent_and_transfers_backbone_a
     )
     parent = v1["model"]
     assert_tagged(parent)
+    assert parent["starting_weights"] == f"{CONV['model']} · random initialization"
     assert parent["finetune_tag"] == YES
 
     new_data = snap(client, prefix="a2-")
@@ -175,6 +176,7 @@ def test_conventional_v1_to_v2_same_labels_keeps_parent_and_transfers_backbone_a
         {**CONV, "parent_model_id": parent["id"]},
     )
     assert v2["job"]["snapshot_id"] == new_data
+    assert v2["model"]["starting_weights"] == f"Finished model #{parent['id']}"
     assert v2["model"]["id"] != parent["id"]
     assert v2["model"]["metadata"].get("parent_model_id") == parent["id"]
     warm = [m for m in v2["events"] if "warm start" in m]

@@ -23,6 +23,7 @@ from ..jobs import TERMINAL_STATES, AlreadyRetried, JobQueue
 from ..jsonsafe import find_non_finite, sanitise_non_finite
 from ..pipelines import PLANNED_PIPELINES
 from ..pipelines.stock_model import list_stock_packages
+from ..provenance import starting_weights
 from ..storage import LocalObjectStore
 from .security import audit, principal_name, record_audit
 
@@ -403,22 +404,37 @@ async def stream_job(
 # --------------------------------------------------------------------------- models
 
 
+_MODEL_SELECT = (
+    "SELECT " + ", ".join(f"j.{c.strip()}" for c in _MODEL_COLUMNS.split(","))
+    + ", j.object_key, d.id AS dataset_id, d.name AS dataset_name, d.workspace_id,"
+    " train.params AS training_params, s.features IS NOT NULL AS prepared_snapshot"
+    f" FROM model_versions j {_DATASET_JOIN} JOIN jobs train ON train.id = j.job_id"
+)
+
+
+def _describe_start(row):
+    params = row.pop("training_params")
+    prepared = row.pop("prepared_snapshot")
+    meta = row["metadata"] or {}
+    row["starting_weights"] = meta.get("starting_weights") or starting_weights(
+        row["pipeline"], params, meta, random_head=prepared
+    )
+
+
 @router.get("/models")
 def list_models(
     request: Request, job_id: Optional[int] = None, workspace_id: Optional[int] = None
 ):
-    columns = ", ".join(f"j.{c.strip()}" for c in _MODEL_COLUMNS.split(","))
     with connect(request.app.state.settings.database_url) as conn:
         rows = conn.execute(
-            f"SELECT {columns}, j.object_key, d.id AS dataset_id, d.name AS dataset_name, d.workspace_id"
-            f" FROM model_versions j {_DATASET_JOIN}"
-            " WHERE (%s::bigint IS NULL OR j.job_id = %s)"
+            _MODEL_SELECT + " WHERE (%s::bigint IS NULL OR j.job_id = %s)"
             " AND (%s::bigint IS NULL OR d.workspace_id = %s) ORDER BY j.id",
             (job_id, job_id, workspace_id, workspace_id),
         ).fetchall()
         active = _active_deployments(conn)
     objects_dir = request.app.state.settings.objects_dir
     for row in rows:
+        _describe_start(row)
         tag_model(objects_dir, row)
         row.pop("object_key", None)
         row["active_deployments"] = active.get(row["id"], [])
@@ -457,13 +473,14 @@ def _model_or_404(request: Request, model_id: int, columns: str) -> dict:
 
 @router.get("/models/{model_id}")
 def get_model(model_id: int, request: Request):
-    row = _model_or_404(request, model_id, f"{_MODEL_COLUMNS}, object_key")
+    with connect(request.app.state.settings.database_url) as conn:
+        row = conn.execute(_MODEL_SELECT + " WHERE j.id = %s", (model_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, f"model {model_id} not found")
+        row["active_deployments"] = _active_deployments(conn, model_id).get(model_id, [])
+    _describe_start(row)
     tag_model(request.app.state.settings.objects_dir, row)
     row.pop("object_key", None)
-    with connect(request.app.state.settings.database_url) as conn:
-        row["active_deployments"] = _active_deployments(conn, model_id).get(
-            model_id, []
-        )
     row["stock_comparison"] = stock_comparison(row["metrics"], row["metadata"])
     row["reference_comparison"] = reference_comparison(row["metrics"])
     return row

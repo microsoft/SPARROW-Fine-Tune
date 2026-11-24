@@ -31,6 +31,7 @@ from ..calibration import (
     threshold_metrics,
 )
 from . import ExportResult, JobContext, Trainer, dynamo_onnx_bytes, parity_check
+from ..provenance import starting_weights
 from .dinov3_linear import (
     _expected_calibration_error,
     _split_key,
@@ -1163,6 +1164,7 @@ class ConventionalClassifierTrainer(Trainer):
         metrics = report["metrics"]
         card = {
             "pipeline": self.id,
+            "starting_weights": starting_weights(self.id, params, {}),
             "model": params["model"],
             "labels": list(ctx.labels),
             "params": dict(params),
@@ -1217,6 +1219,7 @@ class ConventionalClassifierTrainer(Trainer):
             zf.writestr("manifest.json", json.dumps(manifest, indent=2))
         ctx.emit("export", "bundle written", **parity)
         metadata = {
+            "starting_weights": card["starting_weights"],
             "labels": list(ctx.labels),
             "model_arch": params["model"],
             "hardware": trained.get("hardware"),

@@ -641,6 +641,7 @@ def test_end_to_end_push_list_import_warm_start(conv_svc, studio):
     assert len(warm) == 1 and "head loaded" in warm[0], messages
     (second_model,) = models_for_job(client, second)
     assert second_model["metadata"].get("base_model_id") == base["id"]
+    assert second_model["starting_weights"] == f"Imported base model #{base['id']}"
 
 
 # --------------------------------------------------------------------------- UI

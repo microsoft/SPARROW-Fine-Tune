@@ -31,6 +31,7 @@ from ..calibration import (
     threshold_metrics,
 )
 from ..embedders import Embedder, EmbeddingCache, embedder_fingerprint
+from ..provenance import starting_weights
 from . import ExportResult, JobContext, Trainer, dynamo_onnx_bytes, parity_check
 from .near_dup import DEFAULT_MAX_DISTANCE, dhash, near_duplicate_report
 from .stock_model import (
@@ -1089,6 +1090,7 @@ class DinoV3LinearTrainer(Trainer):
         metrics = report["metrics"]
         card = {
             "pipeline": self.id,
+            "starting_weights": starting_weights(self.id, ctx.params, {"embedder": prepared["embedder"]}, random_head=True),
             "labels": list(ctx.labels),
             "params": dict(ctx.params),
             "metrics": metrics,
@@ -1141,6 +1143,7 @@ class DinoV3LinearTrainer(Trainer):
                 zf.writestr(info, data)
         ctx.emit("export", "bundle written", **parity)
         metadata = {
+            "starting_weights": card["starting_weights"],
             "labels": list(ctx.labels),
             "embedder": prepared["embedder"],
             **threshold_manifest(report.get("threshold")),

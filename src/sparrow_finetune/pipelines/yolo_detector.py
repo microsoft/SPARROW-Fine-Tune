@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterator, Optional
 import numpy as np
 
 from . import ExportResult, JobContext, Trainer
+from ..provenance import starting_weights
 from .dinov3_linear import assign_split
 from .near_dup import DEFAULT_MAX_DISTANCE, dhash, near_duplicate_report
 
@@ -1273,6 +1274,7 @@ class YoloDetectorTrainer(Trainer):
         weights_bytes = weights.read_bytes()
         card = {
             "pipeline": self.id,
+            "starting_weights": starting_weights(self.id, params, {}),
             "task": self.task,
             "labels": list(ctx.labels),
             "base_model": params["model"],
@@ -1335,6 +1337,7 @@ class YoloDetectorTrainer(Trainer):
             zf.writestr("manifest.json", json.dumps(manifest, indent=2))
         ctx.emit("export", "bundle written", max_abs_delta=max_abs_delta)
         metadata: dict[str, Any] = {
+            "starting_weights": card["starting_weights"],
             "labels": list(ctx.labels),
             "base_model": params["model"],
             "per_class": per_class,

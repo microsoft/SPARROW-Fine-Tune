@@ -3102,6 +3102,10 @@ function renderModel() {
   $("#model-detail").hidden = !m;
   if (!m) return;
   $("#model-name").textContent = modelTitle(m);
+  const parent = state.models.find((other) => other.id === m.metadata?.parent_model_id);
+  $("#model-origin").textContent = m.starting_weights
+    ? `${m.starting_weights}${parent?.name ? ` · ${parent.name}` : ""}`
+    : "Not recorded";
   if (state.renamingModel !== m.id) toggleRename(false);
   $("#model-format").textContent = m.format;
   const which = m.name ? `Model #${m.id} · ${pipelineName(m.pipeline)} · ` : "";
@@ -3150,8 +3154,6 @@ function renderModel() {
   ];
   const hw = hardwareText(m.metadata && m.metadata.hardware);
   if (hw) record.push(["Trained on", hw]);
-  const parentId = m.metadata && m.metadata.parent_model_id;
-  if (parentId) record.push(["Started from", `Model #${parentId}`]);
   $("#model-record").replaceChildren(...record.map(([k, v]) => el("div", {}, el("dt", { text: k }), el("dd", { text: v }))));
 }
 

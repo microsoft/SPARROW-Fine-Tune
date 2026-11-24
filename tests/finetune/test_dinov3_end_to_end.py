@@ -119,6 +119,10 @@ def test_b16_end_to_end_dinov3_linear_job(settings, onnx_model):
         assert job["state"] == "succeeded", job
 
         (model,) = models_for_job(client, job_id)
+        origin = model["starting_weights"]
+        assert "randomly initialized linear head" in origin
+        assert model["metadata"]["embedder"]["id"] in origin
+        assert client.get(f"/v1/models/{model['id']}").json()["starting_weights"] == origin
         art = client.get(f"/v1/models/{model['id']}/artifact")
         assert art.status_code == 200
         assert hashlib.sha256(art.content).hexdigest() == model["sha256"]
@@ -128,6 +132,7 @@ def test_b16_end_to_end_dinov3_linear_job(settings, onnx_model):
     bundle = read_bundle_bytes(art.content)
     manifest = bundle_json(bundle, "manifest.json")
     card = bundle_json(bundle, "model_card.json")
+    assert card["starting_weights"] == origin
     labels = manifest["labels"]
     assert manifest["embedder"]["model_hash"] == hashlib.sha256(onnx_model.read_bytes()).hexdigest()
 

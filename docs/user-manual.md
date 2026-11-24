@@ -136,6 +136,12 @@ model zoo. Everyone who can sign in to the same service can see the workspaces t
 
 ### Retraining a finished model on new data
 
+On **Models**, select a version and read **Started from** under its name. This is the
+training starting point, not the stock model used for comparison. For a first DINO run,
+the encoder stays frozen; only the linear head starts from random weights. Retrained
+versions identify their immediate parent by model ID. Newly exported `model_card.json`
+files also include `starting_weights`.
+
 A finished image classifier (`conventional_classifier`) or DINOv3 (`dinov3_linear`) model can
 be the starting point of a new job on a new snapshot. The finished model is not changed; the
 new job registers a new version that records it as its parent.

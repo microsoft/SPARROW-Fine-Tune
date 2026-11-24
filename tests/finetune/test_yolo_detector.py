@@ -573,6 +573,7 @@ def test_c8_manifest_contents(trained):
 def test_c8_model_card_contents(trained):
     ctx, metrics, items = trained["ctx"], trained["metrics"], trained["items"]
     card = bundle_json(trained["bundle"], "model_card.json")
+    assert ctx.params["model"] in card["starting_weights"]
     for key, value in ctx.params.items():
         if isinstance(value, float):
             assert card["params"][key] == pytest.approx(value), key
