@@ -324,10 +324,9 @@
                     <button class="btn btn-lite compact" type="button" id="crop-prep-show-all" hidden>Show all images</button>
                   </section>
                   <section class="feature-prep" id="feature-prep" aria-labelledby="feature-prep-title" hidden>
-                    <h3 id="feature-prep-title">DINO features (optional)</h3>
+                    <h3 id="feature-prep-title">DINO feature preparation</h3>
                     <p class="help-text" id="feature-prep-summary" aria-live="polite"></p>
-                    <label class="check-inline"><input type="checkbox" id="prepare-features"> Prepare DINO features with this snapshot</label>
-                    <p class="help-text">Off by default. When ticked, the DINO image encoder runs once over this snapshot's crops so DINO training can use cached features. Crops already cached are reused. Snapshots made without this option are never prepared.</p>
+                    <p class="help-text">Creating a snapshot prepares the features needed for DINO training. Only crops without valid cached features need extraction.</p>
                   </section>
                   <button class="btn full" id="create-snapshot" type="button">Create immutable snapshot</button>
                   <div class="feature-prep-status" id="feature-prep-status" role="status" aria-live="polite" hidden>

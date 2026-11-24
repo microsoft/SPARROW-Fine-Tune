@@ -117,13 +117,12 @@ valid DINO features, then **Feature extracted**. Hover over the tag for the crop
 The snapshot panel shows totals for cached, missing, stale, and corrupt crops.
 When every crop is cached, the panel says there is no new data and nothing to compute.
 
-Tick **Prepare DINO features with this snapshot** (off by default) before **Create immutable
-snapshot**. A progress pane appears at once and follows the real preparation (crops computed,
+With DINO selected, click **Create immutable snapshot**. Feature preparation runs automatically.
+A progress pane appears at once and follows the preparation (crops computed,
 crops reused) until it is ready or fails. If no crop needs computing, it reports that nothing
-was computed. On failure, **Retry DINO preparation** creates a prepared snapshot again; crops
-already cached are reused. Snapshots created without the box get no DINO work at all, and a
-DINOv3 job on such a snapshot is refused with a pointer to Data Preparation. Switching to
-another dataset stops showing the previous dataset's progress.
+was computed. Use **Retry DINO preparation** if preparation fails.
+Conventional and detection snapshots do not request feature extraction. Switching away from
+DINO hides its controls and progress but does not cancel an already queued extraction.
 
 API: `GET /v1/datasets/{id}/feature-prep` returns `{"items", "counts", "to_compute",
 "message"}` (classification datasets only); `POST /v1/datasets/{id}/snapshots` with

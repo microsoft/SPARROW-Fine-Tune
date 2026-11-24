@@ -378,17 +378,15 @@ async function loadDataset() {
     state.snapshot = snaps.length ? snaps.reduce((a, b) => (a.id > b.id ? a : b)) : null;
   }
   await loadCropPrep();
-  await loadFeaturePrep();
   $("#topbar-dataset").textContent = state.dataset ? `${state.dataset.name} · ${state.dataset.task}` : "Model fine-tuning";
   renderDatasetPanel();
   renderPipelines();
   renderItems();
+  await refreshPipelineFeatures();
   renderSnapshot();
   renderLabelFormat();
   await renderDetectionTools();
   renderCropPrep();
-  renderFeaturePrep();
-  watchSnapshotFeatures();
   await loadParentModels();
 }
 
@@ -414,7 +412,7 @@ const PIPELINE_GUIDES = {
   dinov3_linear: {
     summary: "Recommended first choice. Trains only a new, randomly initialised linear head on top of a frozen DINO image encoder. The encoder is never changed, so training is usually faster than fine-tuning a whole network and can run on CPU; how fast and how accurate depends on your data and hardware.",
     steps: [
-      "Data Preparation: when you tick \"Prepare DINO features\" while creating a snapshot, the encoder embeds each crop of that snapshot once. Crops already cached are reused; DINO training needs a prepared snapshot.",
+      "Data Preparation: creating a DINO snapshot automatically extracts missing crop features and reuses valid cached features. Training uses the prepared snapshot.",
       "Prepare: crops every labelled box (or whole image) and splits train/validation by group so photos of the same event stay together.",
       "Train: fits a one-vs-rest logistic-regression head (SGD, L2) one pass per epoch and keeps the epoch with the best validation macro-F1. It must score within 0.02 macro-F1 of a full-batch logistic regression on the same features, or the run fails (with fewer than 100 validation crops it only warns).",
       "Calibrate: picks the lowest confidence threshold that keeps validation accuracy at or above the target (default 95%); predictions below it are labelled unknown and sent to review.",
@@ -2300,11 +2298,10 @@ function renderSnapshot() {
 
 // missingBoxes="exclude" sends excludeImages, the exact list the user saw, so the server refuses
 // (409) instead of leaving out an image that started needing a box after the user agreed.
-async function createSnapshot(missingBoxes, excludeImages, forcePrepare) {
+async function createSnapshot(missingBoxes, excludeImages) {
   if (!state.datasetId) throw new Error("Create or select a dataset first.");
   const datasetId = state.datasetId;
-  // DINO feature preparation is opt-in per snapshot; snapshots made without it get no DINO work.
-  const prepare = Boolean(forcePrepare || (!$("#feature-prep").hidden && $("#prepare-features").checked));
+  const prepare = isDinoPipeline();
   let snap;
   let body;
   if (missingBoxes) {
@@ -2351,12 +2348,11 @@ async function createSnapshot(missingBoxes, excludeImages, forcePrepare) {
     );
     if (pick === "assist") await cropPrepAssist();
     else if (pick === "draw") await cropPrepDraw();
-    else if (pick === "exclude") await createSnapshot("exclude", needs, prepare);
+    else if (pick === "exclude") await createSnapshot("exclude", needs);
     return;
   }
-  if (prepare && state.datasetId === datasetId) {
+  if (prepare && isDinoPipeline() && state.datasetId === datasetId) {
     state.featureCreating = false;
-    $("#prepare-features").checked = false;
     state.snapshotFeatures = { snapshotId: snap.id, features: snap.features || { state: "queued" }, error: null };
   }
   toast(missingBoxes === "exclude"
@@ -2380,18 +2376,32 @@ async function loadCropPrep() {
 
 // ------------------------------------------- DINO feature preparation (Data Preparation)
 
+function isDinoPipeline() {
+  return state.dataset?.task === "classification" && $("#pipeline-select").value === "dinov3_linear";
+}
+
+async function refreshPipelineFeatures() {
+  state.featurePrep = null;
+  renderFeaturePrep();
+  watchSnapshotFeatures();
+  if (isDinoPipeline()) {
+    await loadFeaturePrep();
+    renderFeaturePrep();
+  }
+}
+
 // GET /v1/datasets/{id}/feature-prep: {items: [{image, crop, status}], counts, to_compute, message}.
 // Classification datasets only; the server answers 422 for detection.
 async function loadFeaturePrep() {
   state.featurePrep = null;
   const id = state.datasetId;
-  if (!id || !state.dataset || isDetection()) return;
+  if (!id || !isDinoPipeline()) return;
   try {
     const prep = await api("GET", `/v1/datasets/${id}/feature-prep`);
-    if (state.datasetId === id) state.featurePrep = prep;
+    if (state.datasetId === id && isDinoPipeline()) state.featurePrep = prep;
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) throw err;
-    if (state.datasetId === id) state.featurePrep = { error: err.message };
+    if (state.datasetId === id && isDinoPipeline()) state.featurePrep = { error: err.message };
   }
 }
 
@@ -2421,32 +2431,29 @@ function renderImageFeatureBadges(items) {
 }
 
 function renderFeaturePrep() {
-  const offered = Boolean(state.dataset && !isDetection());
+  const offered = isDinoPipeline();
   $("#feature-prep").hidden = !offered;
   renderImageFeatureBadges(offered ? state.featurePrep?.items || [] : []);
   const summary = $("#feature-prep-summary");
+  const prep = state.featurePrep;
+  $("#create-snapshot").disabled = offered && (!prep || Boolean(prep.error) || prep.available === false);
   if (!offered) {
-    $("#prepare-features").checked = false;
     summary.textContent = "";
     return;
   }
-  const prep = state.featurePrep;
-  const choice = $("#prepare-features");
-  choice.disabled = !prep || Boolean(prep.error) || prep.available === false;
   if (prep && prep.available === false) {
-    choice.checked = false;
     summary.textContent = prep.message;
     return;
   }
   if (!prep || prep.error) {
-    summary.textContent = prep && prep.error ? `Could not read the DINO feature cache: ${prep.error}` : "";
+    summary.textContent = prep && prep.error ? `Could not read the DINO feature cache: ${prep.error}` : "Checking cached DINO features…";
     return;
   }
   const c = prep.counts || {};
   const todo = prep.to_compute !== undefined ? prep.to_compute : (c.missing || 0) + (c.stale || 0) + (c.corrupt || 0);
   const counts = `${plural(c.total || 0, "crop")}: ${c.valid || 0} cached, ${c.missing || 0} missing, ${c.stale || 0} stale, ${c.corrupt || 0} corrupt.`;
   summary.textContent = todo
-    ? `${counts} A prepared snapshot would compute ${plural(todo, "crop")} and reuse the rest.`
+    ? `${counts} Creating a snapshot will compute features for ${plural(todo, "crop")} and reuse the rest.`
     : `${counts} No new data: nothing to compute, every crop already has cached DINO features.`;
 }
 
@@ -2516,11 +2523,7 @@ function renderSnapshotFeatures() {
   }
   const f = sf.features || {};
   if (!f.state || f.state === "not_prepared") {
-    if ($("#pipeline-select").value === "dinov3_linear") {
-      showFeatureStatus("info", `Snapshot ${sf.snapshotId} has no DINO features prepared, so DINO training cannot start from it. Tick "Prepare DINO features with this snapshot" in Data Preparation and create a snapshot.`);
-    } else {
-      hideFeatureStatus();
-    }
+    showFeatureStatus("info", `Snapshot ${sf.snapshotId} has no prepared DINO features. Create a new snapshot with DINO selected to prepare them.`);
     return;
   }
   const busy = featureBusy(f);
@@ -2534,7 +2537,7 @@ function renderSnapshotFeatures() {
 // Called after every dataset load: watch the dataset's latest snapshot only.
 function watchSnapshotFeatures() {
   const snap = state.snapshot;
-  if (!snap || isDetection()) {
+  if (!snap || !isDinoPipeline()) {
     stopFeatureWatch();
     return;
   }
@@ -2589,6 +2592,7 @@ async function pollFeatures(job) {
 }
 
 async function retryFeaturePrep() {
+  if (!isDinoPipeline()) return;
   const sf = state.snapshotFeatures;
   const job = state.featureJob;
   if (sf && sf.error && job && job.snapshotId === sf.snapshotId) {
@@ -2603,7 +2607,7 @@ async function retryFeaturePrep() {
     if (state.featureJob === job) await pollFeatures(job);
     return;
   }
-  await createSnapshot(undefined, undefined, true);
+  await createSnapshot();
 }
 
 function cropPrepDetector() {
@@ -3665,7 +3669,7 @@ function bind() {
   $("#new-dataset-task").addEventListener("change", renderNewDatasetOptions);
   $("#assist-speciesnet").addEventListener("change", onAssistModelChange);
   $("#pipeline-select").addEventListener("change", renderPipelineSummary);
-  $("#pipeline-select").addEventListener("change", renderSnapshotFeatures);
+  $("#pipeline-select").addEventListener("change", guarded(refreshPipelineFeatures));
   $("#upload-btn").addEventListener("click", guarded(() => pickFile("#upload-files")));
   $("#upload-files").addEventListener("change", guarded(uploadImages));
   $("#import-annotations-btn").addEventListener("click", guarded(() => pickFile("#annotations-file")));

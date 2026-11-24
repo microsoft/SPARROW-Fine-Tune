@@ -488,7 +488,35 @@ class TestBrowserFirstRun:
     def registry(self, settings):
         return builtin_registry(settings)
 
-    def test_choices_upload_removed_and_opt_in_dino_preparation(
+    def test_detector_snapshot_never_requests_features(self, standalone_server, client, settings):
+        pw = pytest.importorskip("playwright.sync_api")
+        from .test_backlog_service_ui import _browser, _login
+
+        ds = create_dataset(client, create_workspace(client)["id"], task="detection")["id"]
+        image = syn("detector-")[0]
+        assert client.put(f"/v1/datasets/{ds}/images/{image.name}", content=image.png).is_success
+        assert import_annotations(client, ds, [annotation_item(image.name, "cat", [0, 0, 5, 5])]).is_success
+        add_user(settings, "alice", PASSWORD)
+        with pw.sync_playwright() as playwright:
+            browser, page = _browser(playwright, [])
+            try:
+                reads = []
+                page.on("request", lambda r: reads.append(r.url)
+                        if r.url.endswith(("/feature-prep", "/features")) else None)
+                _login(page, standalone_server)
+                pw.expect(page.locator("#pipeline-select")).to_have_value("yolo_detector")
+                with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/snapshots")) as snap:
+                    page.click("#create-snapshot")
+                assert snap.value.status == 201
+                assert not (snap.value.request.post_data_json or {}).get("prepare_features")
+                pw.expect(page.locator("#snapshot-info")).to_contain_text(f"Snapshot {snap.value.json()['id']}:")
+                pw.expect(page.locator("#feature-prep")).to_be_hidden()
+                pw.expect(page.locator("#feature-prep-status")).to_be_hidden()
+                assert not reads
+            finally:
+                browser.close()
+
+    def test_choices_upload_removed_and_pipeline_specific_preparation(
         self, standalone_server, settings, registry, client
     ):
         sync_api = pytest.importorskip("playwright.sync_api")
@@ -507,20 +535,29 @@ class TestBrowserFirstRun:
                 )
                 expect(dino_opt).to_contain_text("Recommended")
 
-                # Data Preparation: DINO features are opt-in and show progress.
-                box = page.locator("#prepare-features")
-                expect(box).to_be_visible()
-                expect(box).not_to_be_checked()
-                box.check()
+                expect(page.locator("#feature-prep")).to_be_visible()
+                expect(page.locator("#feature-prep input[type=checkbox]")).to_have_count(0)
                 with page.expect_request(
                     lambda r: r.method == "POST" and r.url.endswith("/snapshots")
                 ) as req:
                     page.click("#create-snapshot")
                 assert req.value.post_data_json["prepare_features"] is True
-                expect(page.locator("#feature-prep-status")).to_contain_text("DINO")
+                expect(page.locator("#feature-prep-status")).to_contain_text("queued")
 
                 # Conventional first run: the offered ImageNet architectures, no upload.
                 page.select_option("#pipeline-select", "conventional_classifier")
+                expect(page.locator("#feature-prep")).to_be_hidden()
+                expect(page.locator("#feature-prep-status")).to_be_hidden()
+                feature_reads = []
+                page.on("request", lambda r: feature_reads.append(r.url)
+                        if r.url.endswith(("/feature-prep", "/features")) else None)
+                with page.expect_response(
+                    lambda r: r.request.method == "POST" and r.url.endswith("/snapshots")
+                ) as ordinary:
+                    page.click("#create-snapshot")
+                assert not (ordinary.value.request.post_data_json or {}).get("prepare_features")
+                expect(page.locator("#snapshot-info")).to_contain_text(f"Snapshot {ordinary.value.json()['id']}:")
+                assert not feature_reads
                 arch = page.locator("#model-arch")
                 expect(arch).to_be_visible()
                 expect(arch).to_have_value("resnet50")
