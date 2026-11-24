@@ -1,11 +1,55 @@
 # SPARROW Fine-Tune
 
-Train a species classifier or animal detector from your own camera-trap images. Review the
-labels in a browser, train on a fixed snapshot, and inspect mistakes by species before
-exporting the model. Run Fine-Tune on its own, or open it from a Sparrow Studio project
-to train on reviewed sightings and install the result back into that project.
+**Train a camera-trap model for the species and sites you monitor.** A field team might
+have a season of reviewed photos and a stock classifier that keeps confusing two local
+species. SPARROW Fine-Tune lets the team use those corrections as training data, then
+inspect the per-species results before deciding whether to replace the stock model.
+If the problem is finding animals in the frame rather than naming them, use the same
+workspace to review bounding boxes and train a detector.
 
-[Quick start](#quick-start) · [Choose a pipeline](#choose-a-pipeline) · [Train your first model](#train-your-first-model) · [User manual](docs/user-manual.md)
+Fine-Tune is for wildlife researchers, conservation teams and the people who maintain
+their camera-trap models. A reviewer can correct labels in a browser; a model maintainer
+can train from that exact set of examples, change a setting and compare the two runs.
+Neither needs to write a training script.
+
+[Screenshots](#a-look-inside) · [Quick start](#quick-start) · [Choose a pipeline](#choose-a-pipeline) · [User manual](docs/user-manual.md)
+
+### Why a separate app, and how Studio fits
+
+**Already using Sparrow Studio?** Keep reviewing sightings in your Studio project.
+Open **Model fine-tune** to bring reviewed project data into Fine-Tune. Train and
+evaluate a version here, then choose **Activate in Studio** to send it back to the
+project. Starting a training run does not replace the project's active model.
+
+**Working with a folder of photos or exported annotations?** You can start here without
+installing Studio or creating a Studio project. Training runs on workers attached to
+your Fine-Tune installation. Keeping those workers in a separate service lets you use
+the hardware you have for training, whether or not you manage sightings in Studio.
+
+**Project direction.** We intend to keep both entry points: local training and a
+review–train–evaluate loop connected to Studio. The first release focuses on making that
+loop repeatable: keep the original snapshot, record each model's starting weights and
+use a finished classifier again when the next batch of reviewed photos arrives.
+The [user manual](docs/user-manual.md) describes what you can deploy today.
+
+## A look inside
+
+![A completed classifier job showing preparation, training, evaluation and export stages above the training curves](docs/media/training-job.webp)
+
+*The Jobs page shows where a run finished and how its measurements changed. These
+screens use synthetic demonstration data; the displayed scores aren't field benchmarks.*
+
+<details>
+<summary><strong>Watch the workflow in three screens</strong> (animated GIF)</summary>
+
+![Animated tour: edit a labelled box, inspect a finished training job, then open a model card](docs/media/workflow-tour.gif)
+
+</details>
+
+| Review the training data | Decide what to do with a model |
+|---|---|
+| [![Box editor with a selected bounding box and species label](docs/media/review-boxes.webp)](docs/media/review-boxes.webp) | [![Model card with starting weights, evaluation metrics and an option to reuse the classifier](docs/media/model-card.webp)](docs/media/model-card.webp) |
+| Correct the location and species before creating a snapshot. | Check **Started from**, download the artifact or use this version as the base for another run. |
 
 ## Quick start
 
