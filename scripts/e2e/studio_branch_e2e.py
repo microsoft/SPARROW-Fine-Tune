@@ -344,6 +344,8 @@ def drive_ui(
             )
             page.screenshot(path=str(shots / "01-studio-import.png"), full_page=True)
 
+            page.select_option("#pipeline-select", "conventional_classifier")
+            expect(page.locator("#create-snapshot")).to_be_enabled()
             page.click("#create-snapshot")
             expect(page.locator("#snapshot-info")).to_contain_text(
                 f"{seed['expected_crops']} item(s)"
@@ -354,7 +356,6 @@ def drive_ui(
                 all(c in balance for c in CLASSES),
                 balance.replace("\n", " "),
             )
-            page.select_option("#pipeline-select", "conventional_classifier")
             expect(page.locator("#start-training")).to_be_enabled()
             with page.expect_response(
                 lambda r: r.url.endswith("/v1/jobs") and r.request.method == "POST",
