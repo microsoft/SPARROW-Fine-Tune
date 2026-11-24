@@ -478,7 +478,7 @@ def test_n10_identical_runs_give_byte_identical_bundles(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("embedder", "claims_dinov3"), [("", False), ("onnx:/models/dinov3.onnx", True)]
 )
-def test_n8_worker_without_embedder_does_not_claim_dinov3(
+def test_n8_worker_without_embedder_claims_training_but_not_preparation(
     tmp_path, monkeypatch, embedder, claims_dinov3
 ):
     from sparrow_finetune import workers
@@ -511,7 +511,8 @@ def test_n8_worker_without_embedder_does_not_claim_dinov3(
     reg = Registry()
     register_builtin_pipelines(reg, settings)
     assert workers.run_once(settings, "w", {"cpu"}, registry=reg) is False
-    assert ("dinov3_linear" in seen["pipelines"]) is claims_dinov3
+    assert "dinov3_linear" in seen["pipelines"]
+    assert ("dinov3_features" in seen["pipelines"]) is claims_dinov3
     # The worker advertises the same pipelines it claims, so the queue reason is accurate.
     assert seen["registered"] == seen["pipelines"]
     assert {"yolo_detector", "conventional_classifier"} <= seen["pipelines"]

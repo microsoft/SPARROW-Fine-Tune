@@ -2435,13 +2435,22 @@ function renderFeaturePrep() {
     : `${counts} No new data: nothing to compute, every crop already has cached DINO features.`;
   const items = prep.items || [];
   const crop = (it) => Array.isArray(it.crop) ? ` · crop (${it.crop.join(", ")})` : "";
-  list.replaceChildren(...items.slice(0, FEATURE_ITEMS_SHOWN).map((it) => el("li", { class: "feature-prep-item" },
-    el("span", { class: "feature-prep-name", text: `${it.image}${crop(it)}` }),
-    el("span", { class: `feature-tag feature-${it.status}`, text: FEATURE_TAGS[it.status] || it.status }),
-  )));
-  if (items.length > FEATURE_ITEMS_SHOWN) {
-    list.append(el("li", { class: "muted", text: `…and ${items.length - FEATURE_ITEMS_SHOWN} more` }));
+  list.replaceChildren();
+  function appendPage(start) {
+    const end = Math.min(start + FEATURE_ITEMS_SHOWN, items.length);
+    list.append(...items.slice(start, end).map((it) => el("li", { class: "feature-prep-item" },
+      el("span", { class: "feature-prep-name", text: `${it.image}${crop(it)}` }),
+      el("span", { class: `feature-tag feature-${it.status}`, text: FEATURE_TAGS[it.status] || it.status }),
+    )));
+    if (end < items.length) {
+      const more = el("button", { type: "button", class: "btn btn-lite compact",
+        text: `Show more crops (${items.length - end} remaining)` });
+      const row = el("li", {}, more);
+      more.addEventListener("click", () => { row.remove(); appendPage(end); });
+      list.append(row);
+    }
   }
+  appendPage(0);
 }
 
 const FEATURE_POLL_MS = 1500;
