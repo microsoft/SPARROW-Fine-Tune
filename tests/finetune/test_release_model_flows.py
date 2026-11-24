@@ -23,11 +23,14 @@ not a combinatorial sweep. Each block pins one user-visible contract; unit inter
    and refuses downloads (409). EVERY model row (catalogue, base models, finished runs) carries
    ``finetune_tag`` exactly ``"Can be fine-tuned"`` or ``"Fine-tune not supported"``, plus a
    ``finetune_reason`` for the latter. A positive tag needs validated training weights; it is
-   never inferred from a timm-like name, an ONNX/runtime file or the format.
-4. A validated non-ResNet local package: ``model_arch=efficientnet_b0`` from
-   ``sparrow-uploader prepare-finetune --model-arch efficientnet_b0`` imports and warm-starts a
-   real job; resnet50 stays the default. Browser wording is not ResNet-specific and the tags are
-   visible before any download.
+   never inferred from a timm-like name, an ONNX/runtime file or the format. First release: the
+   Zoo is not a training starting point (every Zoo row says so; a downloaded Zoo model is never a
+   base model and job params cannot name one).
+4. First-run architectures (supersedes the local-package upload journey, which the first release
+   removes): ``efficientnet_b0`` is offered and trains with no package; resnet50 stays the
+   default. Browser wording is not ResNet-specific, there is no upload control, and the tags are
+   visible before any download. DINOv3 snapshots in block 1 are prepared in Data Preparation
+   first, as ``test_release_first_run`` requires.
 
 Known conflict (not weakened): ``test_ft38_whole_image_speciesnet.py::
 test_crop_snapshot_keeps_boxes_and_studio_crops`` expects a crop snapshot with an unboxed raw
@@ -39,8 +42,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import shlex
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -71,14 +72,7 @@ from .test_dinov3_end_to_end import (
     upload_snapshot,
 )
 from .test_ft24_assist_api import _with_megadetector
-from .test_local_base_models import (  # noqa: F401 - standalone_server is a fixture
-    package,
-    resnet_state,
-    st_bytes,
-    standalone_server,
-    upload,
-    uploaded,
-)
+from .test_local_base_models import standalone_server  # noqa: F401 - a fixture
 
 YES = "Can be fine-tuned"
 NO = "Fine-tune not supported"
@@ -115,6 +109,14 @@ def snap(client, labels=("cat", "dog", "fox"), prefix="v") -> int:
         client,
         balanced_items(labels=labels, train_groups=2, val_groups=1, prefix=prefix),
     )
+
+
+def dino_snap(client, settings, registry, prefix: str) -> int:
+    """A classification snapshot whose DINO features were prepared (opt-in) by the worker."""
+    from .test_release_first_run import prepared_snapshot, syn, upload_dataset
+
+    ds = upload_dataset(client, syn(prefix))
+    return prepared_snapshot(client, settings, registry, ds)["id"]
 
 
 def model_row(client, model_id) -> dict:
@@ -246,14 +248,21 @@ def test_dinov3_v1_to_v2_needs_the_identical_encoder(settings, tmp_path):
     enc_b = write_mean_rgb_onnx(tmp_path / "b" / "enc.onnx", flatten=False)
     assert enc_a.read_bytes() != enc_b.read_bytes()
 
+    # First release: DINO trains only on snapshots prepared in Data Preparation
+    # (``test_release_first_run``), so every DINO snapshot here is a prepared one.
     sa = settings_with_embedder(settings, f"onnx:{enc_a}")
     reg_a = builtin_registry(sa)
     with make_client(sa, reg_a) as client:
         parent = run_job(
-            client, sa, reg_a, "dinov3_linear", snap(client, prefix="d1-"), DINO
+            client,
+            sa,
+            reg_a,
+            "dinov3_linear",
+            dino_snap(client, sa, reg_a, "d1-"),
+            DINO,
         )["model"]
         assert parent["finetune_tag"] == YES
-        same = snap(client, prefix="d2-")
+        same = dino_snap(client, sa, reg_a, "d2-")
         preview = client.get(
             f"/v1/models/{parent['id']}/reuse", params={"snapshot_id": same}
         ).json()
@@ -275,7 +284,7 @@ def test_dinov3_v1_to_v2_needs_the_identical_encoder(settings, tmp_path):
     sb = settings_with_embedder(settings, f"onnx:{enc_b}")
     reg_b = builtin_registry(sb)
     with make_client(sb, reg_b) as client:
-        other = snap(client, prefix="d3-")
+        other = dino_snap(client, sb, reg_b, "d3-")
         preview = client.get(
             f"/v1/models/{parent['id']}/reuse", params={"snapshot_id": other}
         ).json()
@@ -659,6 +668,34 @@ def test_download_installs_exactly_one_selected_model(client, engine):
     assert engine.downloads == [["MDV6-yolov10-e"]]
 
 
+def test_zoo_model_is_never_a_training_starting_point(client, engine):
+    """First release: the Zoo is for browsing / download only; training starts from an ImageNet
+    architecture, a finished run or a Studio import (``test_release_first_run``)."""
+    for row in _catalog(client)["models"]:
+        assert row["finetune_tag"] == NO, row
+        assert "starting point" in (row.get("finetune_reason") or "").lower(), row
+    r = _download(client, "AI4G-Amazon-resnet50")
+    assert r.status_code in (200, 201), r.text
+    listed = client.get("/v1/base-models").json()["base_models"]
+    assert [b for b in listed if "AI4G-Amazon-resnet50" in json.dumps(b)] == [], listed
+    from .helpers import build_snapshot
+
+    s = build_snapshot(client)["snapshot"]["id"]
+    for params in (
+        {**SMOKE, "zoo_model_id": "AI4G-Amazon-resnet50"},
+        {**SMOKE, "base_model_id": "AI4G-Amazon-resnet50"},
+    ):
+        r = client.post(
+            "/v1/jobs",
+            json={
+                "pipeline": "conventional_classifier",
+                "snapshot_id": s,
+                "params": params,
+            },
+        )
+        assert r.status_code == 422, r.text
+
+
 @pytest.mark.parametrize("model_id", ["Partner-link-only", "Pending-rights"])
 def test_link_only_and_pending_rights_are_never_downloaded(client, engine, model_id):
     r = _download(client, model_id)
@@ -738,65 +775,43 @@ def test_connected_mode_lists_studio_models_without_downloads(
     assert engine.downloads == []
 
 
-# =========================================================================== 4. efficientnet_b0
+# =========================================================================== 4. first-run architectures
 
+# Superseded (first release): the local package upload journey (efficientnet_b0 ``.zip`` import,
+# warm start from it, and the ``sparrow-uploader`` CLI cross-check) is removed together with
+# ``POST /v1/base-models/local``. The independent checks kept: efficientnet_b0 trains for real,
+# resnet50 stays the default, the browser wording is not ResNet-specific and tags show before any
+# download. Upload removal itself is pinned in ``test_release_first_run``.
 
 EFF = "efficientnet_b0"
 EFF_PARAMS = {**SMOKE, "model": EFF, "epochs": 1, "warmup_epochs": 1}
 
 
-@pytest.fixture(scope="module")
-def eff_state() -> dict:
-    return resnet_state(EFF, classes=3)
-
-
-@pytest.fixture(scope="module")
-def eff_package(eff_state) -> bytes:
-    return package(st_bytes(eff_state), model_arch=EFF)
-
-
-def test_efficientnet_b0_package_imports_tagged_and_resnet50_stays_default(
-    svc, eff_package
-):
-    client, _s, _r = svc
-    row = uploaded(client, eff_package)
-    assert row["model_arch"] == EFF and row["origin"] == "local"
-    assert row["finetune_tag"] == YES
-    for listed in client.get("/v1/base-models").json()["base_models"]:
-        assert_tagged(listed)
-    # The architecture is the manifest's, never inferred: efficientnet tensors declared resnet50 fail.
-    r = upload(client, package(st_bytes(resnet_state(EFF, classes=3, seed=1))))
-    assert r.status_code == 422, r.text
-
-
-def test_efficientnet_b0_end_to_end_warm_start(svc, eff_package):
+def test_efficientnet_b0_is_offered_and_trains_while_resnet50_stays_default(svc):
     client, settings, registry = svc
-    base = uploaded(client, eff_package)
-    s = snap(client, prefix="e-")
-    r = client.post(
-        "/v1/jobs",
-        json={
-            "pipeline": "conventional_classifier",
-            "snapshot_id": s,
-            "params": {**EFF_PARAMS, "model": "resnet50", "base_model_id": base["id"]},
-        },
-    )
-    assert r.status_code == 422 and EFF in r.json()["detail"], r.text
+    (conv,) = [
+        p
+        for p in client.get("/v1/pipelines").json()["pipelines"]
+        if p["id"] == "conventional_classifier"
+    ]
+    archs = {a["id"]: a for a in conv["architectures"]}
+    assert EFF in archs and archs["resnet50"]["default"] is True, archs
     out = run_job(
         client,
         settings,
         registry,
         "conventional_classifier",
-        s,
-        {**EFF_PARAMS, "base_model_id": base["id"]},
+        snap(client, prefix="e-"),
+        EFF_PARAMS,
     )
-    warm = [m for m in out["events"] if "warm start" in m]
-    assert len(warm) == 1 and "head loaded" in warm[0], out["events"]
-    assert out["model"]["metadata"].get("base_model_id") == base["id"]
+    assert out["job"]["params"]["model"] == EFF
+    assert "base_model_id" not in out["model"]["metadata"], out["model"]
+    assert_tagged(out["model"])
+    assert out["model"]["finetune_tag"] == YES
 
 
 def test_ui_wording_is_not_resnet_specific_and_tags_show_before_download(
-    standalone_server, settings, registry, client, engine, eff_package, tmp_path
+    standalone_server, settings, registry, client, engine
 ):
     sync_api = pytest.importorskip("playwright.sync_api")
     from .helpers import build_snapshot
@@ -807,22 +822,20 @@ def test_ui_wording_is_not_resnet_specific_and_tags_show_before_download(
     _register_classifier(registry)
     build_snapshot(client)
     add_user(settings, "alice", PASSWORD)
-    pkg = tmp_path / "efficientnet_b0-package.zip"
-    pkg.write_bytes(eff_package)
     problems: list[str] = []
     with sync_api.sync_playwright() as pw:
         browser, page = _browser(pw, problems)
         try:
             _login(page, standalone_server)
             page.select_option("#pipeline-select", "conventional_classifier")
-            label = page.locator("label[for='local-base-model-file']")
-            expect(label).to_be_visible()
-            expect(label).not_to_contain_text("ResNet-50")
-            page.set_input_files("#local-base-model-file", str(pkg))
-            page.click("#local-base-model-upload")
-            expect(page.locator("#base-model-info")).to_contain_text(
-                EFF, timeout=60_000
+            arch = page.locator("#model-arch")
+            expect(arch).to_be_visible()
+            expect(arch.locator(f"option[value='{EFF}']")).to_have_count(1)
+            expect(page.locator("label[for='model-arch']")).not_to_contain_text(
+                "ResNet-50"
             )
+            expect(page.locator("#local-base-model-file")).to_have_count(0)
+            expect(page.locator("#local-base-model-upload")).to_have_count(0)
             expect(page.locator("#error-banner")).to_be_hidden()
 
             page.click("[data-page='models']")
@@ -830,6 +843,7 @@ def test_ui_wording_is_not_resnet_specific_and_tags_show_before_download(
                 row = page.locator(f"#catalog-list [data-catalog-id='{m.id}']")
                 expect(row).to_be_visible()
                 expect(row.locator(".finetune-tag")).to_have_text(NO)
+                expect(row.get_by_role("button", name="Use as base")).to_have_count(0)
             link = page.locator("#catalog-list [data-catalog-id='Partner-link-only'] a")
             expect(link).to_have_attribute("href", LINK)
             assert (
@@ -838,45 +852,3 @@ def test_ui_wording_is_not_resnet_specific_and_tags_show_before_download(
         finally:
             browser.close()
     assert problems == [], problems
-
-
-@pytest.mark.skipif(
-    not os.environ.get("SPARROW_UPLOADER_CMD"),
-    reason="release cross-check: set SPARROW_UPLOADER_CMD to a sparrow-uploader invocation",
-)
-def test_release_uploader_cli_efficientnet_b0_to_import_to_training(
-    svc, eff_state, tmp_path
-):
-    from safetensors.torch import save_file
-
-    client, settings, registry = svc
-    weights = tmp_path / "effnet.safetensors"
-    save_file(eff_state, str(weights))
-    labels = tmp_path / "labels.txt"
-    labels.write_text("cat\ndog\nfox\n", encoding="utf-8")
-    out = tmp_path / "package.zip"
-    cmd = shlex.split(os.environ["SPARROW_UPLOADER_CMD"]) + [
-        "prepare-finetune",
-        "--weights",
-        str(weights),
-        "--labels",
-        str(labels),
-        "--output",
-        str(out),
-        "--model-arch",
-        EFF,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert json.loads(proc.stdout)["model_arch"] == EFF
-    base = uploaded(client, out.read_bytes())
-    assert base["model_arch"] == EFF
-    out_job = run_job(
-        client,
-        settings,
-        registry,
-        "conventional_classifier",
-        snap(client, prefix="x-"),
-        {**EFF_PARAMS, "base_model_id": base["id"]},
-    )
-    assert any("head loaded" in m for m in out_job["events"]), out_job["events"]
