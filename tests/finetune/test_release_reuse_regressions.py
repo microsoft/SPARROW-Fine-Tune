@@ -3,12 +3,9 @@ from .studio_fake import FakeStudio
 from .test_base_models import seed_model
 from .test_release_model_flows import (
     EFF_PARAMS,
-    eff_package,
-    eff_state,
     run_job,
     snap,
     svc,
-    uploaded,
 )
 
 
@@ -22,13 +19,12 @@ def test_studio_listing_never_fetches_bundle_bytes(settings, registry):
         assert not any(r.url.path.endswith("/bundle") for r in studio.requests)
 
 
-def test_retrain_uses_declared_architecture_without_model_override(svc, eff_package):
+def test_retrain_uses_declared_architecture_without_model_override(svc):
     client, settings, registry = svc
-    base = uploaded(client, eff_package)
     params = {k: v for k, v in EFF_PARAMS.items() if k != "model"}
     snapshot = snap(client)
     first = run_job(client, settings, registry, "conventional_classifier", snapshot,
-                    {**params, "base_model_id": base["id"]})
+                    EFF_PARAMS)
     assert first["job"]["params"]["model"] == "efficientnet_b0"
     second = run_job(client, settings, registry, "conventional_classifier",
                      snap(client, prefix="child-"), {**params, "parent_model_id": first["model"]["id"]})

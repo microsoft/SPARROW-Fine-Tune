@@ -537,7 +537,7 @@ class TestBrowserFirstRun:
                 )
                 assert values == offered
                 expect(page.locator("#local-base-model-file")).to_have_count(0)
-                expect(page.locator("input[type=file][accept*='zip']")).to_have_count(0)
+                expect(page.locator("input[type=file][accept*='zip']:not(#annotations-file)")).to_have_count(0)
                 page.select_option("#model-arch", "efficientnet_b0")
                 with page.expect_request(
                     lambda r: r.method == "POST" and r.url.endswith("/v1/jobs")

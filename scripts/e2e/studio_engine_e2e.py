@@ -65,7 +65,12 @@ from studio_branch_e2e import (  # noqa: E402
     run,
     write_override,
 )
-from studio_full_e2e import Api, job_seconds, wait_job  # noqa: E402
+from studio_full_e2e import (  # noqa: E402
+    Api,
+    job_seconds,
+    prepare_dino_snapshot,
+    wait_job,
+)
 
 SPECIES = ("Dasyprocta", "Bos", "Pecari", "Mazama", "Cuniculus")
 DETECTOR, CLASSIFIER = "MDV6-yolov10-c", "AI4G-Amazon-V2"
@@ -677,6 +682,10 @@ def scenario(
             set(counts) == set(SPECIES),
             json.dumps(counts),
         )
+    # dinov3_linear: DINO features are prepared (opt-in, progress polled) before training.
+    snaps["dino"] = prepare_dino_snapshot(
+        api, ds_c, a.train_timeout, "dinov3_linear reviewed Studio crops"
+    )["id"]
     info["snapshots"] = snaps
 
     jobs = {
@@ -689,7 +698,7 @@ def scenario(
                 "stock_model": CLASSIFIER,
             },
         ),
-        "dinov3_linear": (snaps["cls"], {"stock_model": CLASSIFIER}),
+        "dinov3_linear": (snaps["dino"], {"stock_model": CLASSIFIER}),
         "yolo_detector": (
             snaps["det"],
             {
@@ -734,7 +743,7 @@ def scenario(
         gpu_ok,
         f"conventional={info['training']['conventional_classifier']['device']} "
         f"yolo={info['training']['yolo_detector']['device']}; "
-        "dinov3_linear embeds with the ONNX embedder on CPU by design",
+        "dinov3_linear embeds in Data Preparation and trains its head on CPU by design",
     )
 
     stock_gate(api, model, info["projects"]["stock_gate"])

@@ -60,7 +60,10 @@ def builtin_registry(settings):
     return reg
 
 
-def upload_snapshot(client, syn: list[SynItem]) -> int:
+def upload_snapshot(client, syn: list[SynItem], settings=None, registry=None) -> int:
+    """Create a plain snapshot, or prepare DINO features when given worker settings."""
+    from sparrow_finetune.workers import run_once
+
     ws = create_workspace(client)
     ds = create_dataset(client, ws["id"], task="classification")
     for it in syn:
@@ -70,9 +73,16 @@ def upload_snapshot(client, syn: list[SynItem]) -> int:
     assert r.status_code == 200, r.text
     # Unboxed items stand for Studio crops: a crop-trained dataset keeps them whole-frame.
     mark_studio(client, ds["id"], [it.name for it in syn if it.bbox is None])
-    snap = client.post(f"/v1/datasets/{ds['id']}/snapshots")
+    snap = client.post(f"/v1/datasets/{ds['id']}/snapshots", json={"prepare_features": settings is not None})
     assert snap.status_code == 201, snap.text
-    return snap.json()["id"]
+    snapshot = snap.json()
+    if settings is None:
+        return snapshot["id"]
+    if snapshot["features"]["to_compute"]:
+        assert run_once(settings, "prep-worker", {"cpu"}, registry=registry) is True
+    features = client.get(f"/v1/snapshots/{snapshot['id']}/features").json()
+    assert features["state"] == "ready", features
+    return snapshot["id"]
 
 
 def submit(client, snapshot_id, params=None) -> int:
@@ -102,7 +112,7 @@ def test_b16_end_to_end_dinov3_linear_job(settings, onnx_model):
         pipelines = {p["id"]: p for p in as_list(client.get("/v1/pipelines").json(), "pipelines")}
         assert pipelines["dinov3_linear"]["status"] == "available"
 
-        snapshot_id = upload_snapshot(client, syn)
+        snapshot_id = upload_snapshot(client, syn, s, registry)
         job_id = submit(client, snapshot_id, {"max_epochs": 20})
         assert run_once(s, "e2e-worker", {"cpu"}, registry=registry) is True
         job = get_job(client, job_id)
@@ -190,7 +200,7 @@ def test_b9_job_fails_when_label_below_class_floor(settings, onnx_model):
     syn.append(SynItem("b9-rare-0.png", "rare", "b9-rare-group", None, synthetic_png("cat", 777, None)))
 
     with make_client(s, registry) as client:
-        job_id = submit(client, upload_snapshot(client, syn), {"max_epochs": 5})
+        job_id = submit(client, upload_snapshot(client, syn, s, registry), {"max_epochs": 5})
         assert run_once(s, "b9-worker", {"cpu"}, registry=registry) is True
         job = get_job(client, job_id)
         assert job["state"] == "failed", job
@@ -231,7 +241,7 @@ def test_b10_cancel_during_train_cancels_job_without_model(settings, onnx_model)
     syn = synthetic_items(groups_per_label=4, prefix="b10-")
 
     with make_client(s, registry) as client:
-        job_id = submit(client, upload_snapshot(client, syn), {"max_epochs": 50})
+        job_id = submit(client, upload_snapshot(client, syn, s, builtin_registry(s)), {"max_epochs": 50})
         assert run_once(s, "b10-worker", {"cpu"}, registry=registry, lease_seconds=0.9) is True
         assert get_job(client, job_id)["state"] == "cancelled"
         assert models_for_job(client, job_id) == []
@@ -253,19 +263,19 @@ def test_b17_settings_from_env_reads_embedder(monkeypatch, tmp_path):
     assert Settings.from_env().embedder == ""
 
 
-def test_b17_worker_without_embedder_leaves_dinov3_job_queued(settings, onnx_model):
-    """P1B-N8: a worker with no SPARROW_FT_EMBEDDER does not claim the job; one with it does."""
+def test_b17_worker_without_embedder_trains_a_prepared_dinov3_job(settings, onnx_model):
+    """P1B-N8, migrated: the encoder is needed where features are computed, which is now Data
+    Preparation (pinned by ``test_release_first_run``). Training only reads prepared vectors, so
+    a worker with no SPARROW_FT_EMBEDDER claims and trains the job."""
     from sparrow_finetune.workers import run_once
 
+    s2 = settings_with_embedder(settings, f"onnx:{onnx_model}")
     s = settings_with_embedder(settings, "")
     registry = builtin_registry(s)
-    with make_client(s, registry) as client:
-        job_id = submit(client, upload_snapshot(client, synthetic_items(groups_per_label=3, prefix="b17-")))
-        assert run_once(s, "b17-worker", {"cpu"}, registry=registry) is False
-        assert get_job(client, job_id)["state"] == "queued"
-
-        s2 = settings_with_embedder(settings, f"onnx:{onnx_model}")
-        assert run_once(s2, "b17-worker-2", {"cpu"}, registry=builtin_registry(s2)) is True
+    with make_client(s2, builtin_registry(s2)) as client:
+        snapshot_id = upload_snapshot(client, synthetic_items(groups_per_label=3, prefix="b17-"), s2, builtin_registry(s2))
+        job_id = submit(client, snapshot_id)
+        assert run_once(s, "b17-worker", {"cpu"}, registry=registry) is True
         assert get_job(client, job_id)["state"] == "succeeded", get_job(client, job_id)
 
 
@@ -283,7 +293,7 @@ def test_ft4_job_fails_when_reference_gate_trips(settings, onnx_model, monkeypat
         # FT-19: enforced on any validation size only when reference_min_val_crops allows it.
         job_id = submit(
             client,
-            upload_snapshot(client, balanced_items(prefix="ft4-")),
+            upload_snapshot(client, balanced_items(prefix="ft4-"), s, registry),
             {"max_epochs": 5, "reference_min_val_crops": 0},
         )
         assert run_once(s, "ft4-worker", {"cpu"}, registry=registry) is True
@@ -302,7 +312,7 @@ def test_ft19_small_val_job_succeeds_with_reference_warning(settings, onnx_model
     s = settings_with_embedder(settings, f"onnx:{onnx_model}")
     registry = builtin_registry(s)
     with make_client(s, registry) as client:
-        job_id = submit(client, upload_snapshot(client, balanced_items(prefix="ft19-")), {"max_epochs": 5})
+        job_id = submit(client, upload_snapshot(client, balanced_items(prefix="ft19-"), s, registry), {"max_epochs": 5})
         assert run_once(s, "ft19-worker", {"cpu"}, registry=registry) is True
         job = get_job(client, job_id)
         assert job["state"] == "succeeded", job

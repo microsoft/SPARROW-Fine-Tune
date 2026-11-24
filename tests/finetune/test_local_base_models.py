@@ -119,10 +119,11 @@ def upload(client, data: bytes, filename: str = "resnet50-package.zip"):
     return client.post(ROUTE, files={"file": (filename, data, "application/zip")})
 
 
-def uploaded(client, data: bytes) -> dict:
-    r = upload(client, data)
-    assert r.status_code == 201, r.text
-    return r.json()
+def existing_package(settings, data: bytes) -> dict:
+    """Simulate a package stored before removal of user uploads."""
+    from sparrow_finetune.base_models import inspect_local_package, store_local
+
+    return store_local(settings, inspect_local_package(data))[0]
 
 
 def base_models(client) -> list:
@@ -186,38 +187,15 @@ def _snapshot(client) -> int:
 # --------------------------------------------------------------------------- upload
 
 
-def test_local_upload_stores_a_resnet50_base_model_without_studio(
-    local_svc, r50_package
-):
-    client, settings, _r = local_svc
-    r = upload(client, r50_package)
-    assert r.status_code == 201, r.text
-    row = r.json()
-    assert row["origin"] == "local"
-    # A local model has no Studio provenance; none may be invented.
-    assert row.get("studio_project_id") is None
-    assert row.get("studio_import_id") is None
-    assert row.get("source_model_id") is None
-    assert row["pipeline"] == "conventional_classifier"
-    assert row["model_arch"] == "resnet50"
-    assert row["labels"] == LABELS
-    assert row["sha256"] == sha(r50_package)
-    assert row["size_bytes"] == len(r50_package)
-    assert "object_key" not in row
-    (listed,) = base_models(client)
-    assert listed["id"] == row["id"] and listed["origin"] == "local"
-    assert len(stored_objects(settings)) == 1
+def test_local_package_validation_accepts_a_resnet50_package(r50_package):
+    """The upload route is gone (``test_release_first_run``); the package validator it used stays
+    pinned at its own level: a valid timm ResNet-50 package yields its facts."""
+    from sparrow_finetune import base_models as bm
 
-
-def test_local_upload_is_idempotent(local_svc, r50_package):
-    client, settings, _r = local_svc
-    first = upload(client, r50_package)
-    assert first.status_code == 201, first.text
-    again = upload(client, r50_package)
-    assert again.status_code in (200, 201), again.text
-    assert again.json()["id"] == first.json()["id"]
-    assert [b["id"] for b in base_models(client)] == [first.json()["id"]]
-    assert len(stored_objects(settings)) == 1
+    facts = bm.inspect_local_package(r50_package)
+    assert facts["pipeline"] == "conventional_classifier"
+    assert facts["model_arch"] == "resnet50"
+    assert facts["labels"] == LABELS
 
 
 def test_studio_import_reports_studio_origin(settings, registry):
@@ -304,32 +282,22 @@ def _bad_package(case: str, w: bytes, request) -> bytes:
         "weights_not_resnet50",
     ],
 )
-def test_local_upload_rejects_bad_packages_and_stores_nothing(
-    case, local_svc, r50_weights, request
-):
-    client, settings, _r = local_svc
-    r = upload(client, _bad_package(case, r50_weights, request))
-    assert r.status_code == 422, (case, r.status_code, r.text)
-    detail = r.json().get("detail")
-    assert detail, r.text
+def test_local_package_validation_rejects_bad_packages(case, r50_weights, request):
+    from sparrow_finetune import base_models as bm
+
+    with pytest.raises(bm.NotImportable) as err:
+        bm.inspect_local_package(_bad_package(case, r50_weights, request))
+    assert str(err.value), case
     if case == "sha_mismatch":
-        assert "sha256" in str(detail)
-    assert base_models(client) == []
-    assert stored_objects(settings) == []
-
-
-def test_local_upload_requires_the_file_field(local_svc, r50_package):
-    client, _s, _r = local_svc
-    r = client.post(ROUTE, files={"package": ("p.zip", r50_package, "application/zip")})
-    assert r.status_code == 422, r.text
-    assert base_models(client) == []
+        assert "sha256" in str(err.value)
 
 
 @pytest.mark.parametrize("container", ["raw_pickle", "torch_checkpoint"])
-def test_local_upload_never_unpickles_weights(container, local_svc, tmp_path):
+def test_local_package_validation_never_unpickles_weights(container, tmp_path):
     import torch
 
-    client, settings, _r = local_svc
+    from sparrow_finetune import base_models as bm
+
     marker = tmp_path / "PWNED"
     payload = {"fc.weight": _Plant(marker)}
     if container == "raw_pickle":
@@ -338,11 +306,11 @@ def test_local_upload_never_unpickles_weights(container, local_svc, tmp_path):
         buf = io.BytesIO()
         torch.save(payload, buf)
         weights = buf.getvalue()
-    r = upload(client, package(weights))  # the manifest sha256 matches the payload
-    assert not marker.exists(), "the service unpickled an uploaded weights file"
-    assert r.status_code == 422, r.text
-    assert base_models(client) == []
-    assert stored_objects(settings) == []
+    with pytest.raises(bm.NotImportable):
+        bm.inspect_local_package(
+            package(weights)
+        )  # the manifest sha256 matches the payload
+    assert not marker.exists(), "the validator unpickled a package's weights file"
 
 
 # --------------------------------------------------------------------------- jobs
@@ -350,7 +318,7 @@ def test_local_upload_never_unpickles_weights(container, local_svc, tmp_path):
 
 def test_submit_accepts_resnet50_job_with_local_base_model(local_svc, r50_package):
     client, _s, _r = local_svc
-    base = uploaded(client, r50_package)
+    base = existing_package(_s, r50_package)
     job_id = submit_conventional(
         client, _snapshot(client), {**R50, "base_model_id": base["id"]}
     )
@@ -361,7 +329,7 @@ def test_submit_accepts_resnet50_job_with_local_base_model(local_svc, r50_packag
 
 def test_submit_rejects_other_architecture_for_local_base_model(local_svc, r50_package):
     client, _s, _r = local_svc
-    base = uploaded(client, r50_package)
+    base = existing_package(_s, r50_package)
     r = client.post(
         "/v1/jobs",
         json={
@@ -384,7 +352,7 @@ def test_local_base_model_warm_starts_with_the_uploaded_backbone(
     from sparrow_finetune import base_models as bm
 
     client, settings, _r = local_svc
-    base = uploaded(client, r50_package)
+    base = existing_package(settings, r50_package)
     t = trainer()
     items = snapshot_items(
         balanced_items(train_groups=2, val_groups=1, prefix="ws-"), tmp_path / "images"
@@ -422,9 +390,9 @@ def _run_warm_job(client, settings, registry, base_id: int) -> dict:
     return job
 
 
-def test_end_to_end_local_upload_then_warm_started_job(local_svc, r50_package):
+def test_existing_package_remains_readable_for_warm_started_job(local_svc, r50_package):
     client, settings, registry = local_svc
-    _run_warm_job(client, settings, registry, uploaded(client, r50_package)["id"])
+    _run_warm_job(client, settings, registry, existing_package(settings, r50_package)["id"])
 
 
 # --------------------------------------------------------------------------- UI (standalone)
@@ -457,12 +425,10 @@ def standalone_server(settings, registry):
         web.join(10)
 
 
-def test_ui_uploads_and_selects_local_base_model_without_studio(
+def test_ui_no_longer_uploads_or_selects_local_packages(
     standalone_server, settings, registry, client, r50_package, tmp_path
 ):
-    """Without Studio the Studio panel is hidden, yet a local package can be uploaded
-    (``#local-base-model-file`` + ``#local-base-model-upload``), is shown as the base model
-    and is sent as ``base_model_id`` with ``model=resnet50`` when training starts."""
+    """Existing installs retain history but do not advertise uploads in the UI or list."""
     sync_api = pytest.importorskip("playwright.sync_api")
     from .helpers import build_snapshot
     from .test_backlog_service_ui import _browser, _login
@@ -472,8 +438,7 @@ def test_ui_uploads_and_selects_local_base_model_without_studio(
     _register_classifier(registry)
     build_snapshot(client)
     add_user(settings, "alice", PASSWORD)
-    pkg = tmp_path / "resnet50-package.zip"
-    pkg.write_bytes(r50_package)
+    existing_package(settings, r50_package)
     problems: list[str] = []
     with sync_api.sync_playwright() as pw:
         browser, page = _browser(pw, problems)
@@ -481,23 +446,12 @@ def test_ui_uploads_and_selects_local_base_model_without_studio(
             _login(page, standalone_server)
             page.select_option("#pipeline-select", "conventional_classifier")
             expect(page.locator("#studio-panel")).to_be_hidden()
-            page.set_input_files("#local-base-model-file", str(pkg))
-            page.click("#local-base-model-upload")
-            info = page.locator("#base-model-info")
-            expect(info).to_contain_text("resnet50", timeout=60_000)
-            expect(info).to_contain_text("3 classes")
-            expect(info).not_to_contain_text("Studio model")
+            expect(page.locator("#local-base-model-file")).to_have_count(0)
+            expect(page.locator("#local-base-model-upload")).to_have_count(0)
             assert client.get("/v1/base-models").status_code == 401
             listing = page.request.get(f"{standalone_server}/v1/base-models")
             assert listing.status == 200
-            (row,) = listing.json()["base_models"]
-            with page.expect_request(
-                lambda r: r.method == "POST" and r.url.endswith("/v1/jobs")
-            ) as req:
-                page.click("#start-training")
-            params = req.value.post_data_json["params"]
-            assert params["base_model_id"] == row["id"]
-            assert params["model"] == "resnet50"
+            assert listing.json()["base_models"] == []
             expect(page.locator("#error-banner")).to_be_hidden()
         finally:
             browser.close()
@@ -535,6 +489,7 @@ def test_release_cross_check_uploader_cli_to_import_to_trainer(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     data = out.read_bytes()
     r = upload(client, data)
-    assert r.status_code == 201, r.text
-    assert r.json()["sha256"] == sha(data) and r.json()["origin"] == "local"
-    _run_warm_job(client, settings, registry, r.json()["id"])
+    assert r.status_code in (404, 405), r.text
+    row = existing_package(settings, data)
+    assert row["sha256"] == sha(data) and row["origin"] == "local"
+    _run_warm_job(client, settings, registry, row["id"])
