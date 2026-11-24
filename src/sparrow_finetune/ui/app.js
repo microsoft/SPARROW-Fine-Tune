@@ -466,6 +466,7 @@ function renderPipelineGuide(p) {
 
 function renderPipelineSummary() {
   const p = state.pipelines.find((x) => x.id === $("#pipeline-select").value);
+  $("#example-grid").classList.toggle("show-feature-tags", p?.id === "dinov3_linear");
   $("#pipeline-name").textContent = p ? p.name : "No pipeline available for this dataset";
   $("#pipeline-icon").textContent = p ? p.name.charAt(0).toUpperCase() : "-";
   const badge = $("#pipeline-status");

@@ -85,5 +85,13 @@ def test_image_badge_accounts_for_all_crops(request, settings, client):
             pw.expect(badge(0)).to_have_text("Pending feature")
             pw.expect(badge(1)).to_have_text("Feature extracted")
             pw.expect(badge(2)).to_have_count(0)
+            pipeline = page.locator("#pipeline-select")
+            pipeline.select_option("conventional_classifier")
+            pw.expect(badge(0)).to_be_hidden()
+            pw.expect(badge(1)).to_be_hidden()
+            pw.expect(page.locator(".photo-wrap .confidence-label").first).to_be_visible()
+            pipeline.select_option("dinov3_linear")
+            pw.expect(badge(0)).to_be_visible()
+            pw.expect(badge(1)).to_be_visible()
         finally:
             browser.close()

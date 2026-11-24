@@ -709,6 +709,7 @@ body.signed-out .app-shell { margin-left: 0; }
 .confidence-label.attention { background: rgba(184, 102, 8, .90); }
 .confidence-label.excluded { background: rgba(107, 119, 133, .90); }
 .feature-tag { top: auto; bottom: 8px; right: 8px; }
+.example-grid:not(.show-feature-tags) .feature-tag { display: none; }
 .feature-tag.feature-pending { color: var(--neutral-900); background: var(--warning-soft); }
 .feature-tag.feature-valid { color: #176238; background: var(--success-soft); }
 
