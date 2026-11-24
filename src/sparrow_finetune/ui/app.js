@@ -3359,6 +3359,7 @@ async function boot() {
   ]);
   state.pipelines = pipelines.pipelines;
   state.studio = studio;
+  $("#browse-catalog").textContent = studio.configured ? "Browse Studio models" : "Browse Model Zoo";
   await loadStockModels();
   $("#studio-panel").hidden = !studio.configured;
   $("#studio-scope-panel").hidden = !studio.configured;
@@ -3375,7 +3376,13 @@ async function boot() {
     ? (await api("GET", "/v1/workspaces")).workspaces.find((w) => w.studio_project === launch.project)
     : null;
   await loadWorkspaces(linked ? linked.id : undefined);
-  showPage(state.page === "login" ? "data" : state.page);
+  if (!launch.project && location.hash === "#catalog-title") {
+    await showPage("models");
+    $("#catalog-title").focus();
+    $("#catalog-title").scrollIntoView();
+  } else {
+    showPage(state.page === "login" ? "data" : state.page);
+  }
   if (launch.load) {
     $("#studio-uptodate").hidden = true;
     toast("Loading the Studio project's data…");
