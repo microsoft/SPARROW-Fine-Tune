@@ -608,3 +608,220 @@ class TestBrowserFirstRun:
             finally:
                 browser.close()
         assert problems == [], problems
+
+    def test_retraining_older_parent_without_arch_metadata_omits_model(
+        self, standalone_server, settings, registry, client
+    ):
+        """F2: the parent's record predates ``model_arch``; the hidden architecture picker
+        (resnet50 by default) must not be sent, so the server adopts the parent's network."""
+        sync_api = pytest.importorskip("playwright.sync_api")
+        from .test_backlog_service_ui import _browser, _login
+
+        expect = sync_api.expect
+        ds = upload_dataset(client, syn("old-parent-"))
+        parent_snap = new_snapshot(client, ds)
+        job = train(
+            client, settings, registry, "conventional_classifier", parent_snap["id"],
+            {**CONV, "model": "efficientnet_b0"},
+        )
+        (parent,) = models_for_job(client, job["id"])
+        _sql(
+            settings,
+            "UPDATE model_versions SET metadata = metadata - 'model_arch' - 'model'"
+            " WHERE id = %s",
+            (parent["id"],),
+        )
+        listed = client.get(f"/v1/models/{parent['id']}").json()
+        assert not {"model_arch", "model"} & set(listed.get("metadata") or {}), listed
+
+        add_user(settings, "alice", PASSWORD)
+        problems: list[str] = []
+        with sync_api.sync_playwright() as pw:
+            browser, page = _browser(pw, problems)
+            try:
+                _login(page, standalone_server)
+                page.select_option("#pipeline-select", "conventional_classifier")
+                with page.expect_response(
+                    lambda r: r.request.method == "POST" and r.url.endswith("/snapshots")
+                ) as made:
+                    page.click("#create-snapshot")
+                assert made.value.status == 201
+                expect(page.locator("#snapshot-info")).to_contain_text(
+                    f"Snapshot {made.value.json()['id']}:"
+                )
+                picker = page.locator("#parent-model-select")
+                expect(picker.locator(f"option[value='{parent['id']}']")).to_have_count(1)
+                picker.select_option(str(parent["id"]))
+                expect(page.locator("#model-arch-field")).to_be_hidden()
+                try:
+                    with page.expect_response(
+                        lambda r: r.request.method == "POST" and r.url.endswith("/v1/jobs")
+                    ) as started:
+                        page.click("#start-training")
+                except sync_api.TimeoutError:
+                    banner = page.locator("#error-banner")
+                    pytest.fail(f"no POST /v1/jobs; page shows: {banner.inner_text()!r}")
+                sent = started.value.request.post_data_json["params"]
+                assert sent["parent_model_id"] == parent["id"], sent
+                assert "model" not in sent, sent
+                assert started.value.status == 201, started.value.text()
+                assert started.value.json()["params"]["model"] == "efficientnet_b0"
+                expect(page.locator("#error-banner")).to_be_hidden()
+            finally:
+                browser.close()
+        assert problems == [], problems
+
+
+# =========================================================================== F. regressions
+#
+# Release-audit regressions. F1: a finished Data Preparation run is not a "training job": it
+# must not force the include_models confirmation, nor be reported as one in the deletion
+# preview, while queued/running preparation and real training keep their protections.
+# F2 (browser, in TestBrowserFirstRun): retraining an older conventional model whose record
+# lacks ``model_arch`` must not send the hidden default architecture; the server adopts the
+# parent's own. F3: preparation failure, cancel, retry and worker-crash recovery through the
+# public API and the real worker.
+
+
+def _sql(settings, query, params=()):
+    import psycopg
+
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        cur = conn.execute(query, params)
+        return cur.fetchall() if cur.description else None
+
+
+def _deletion_target(client, settings, kind: str, ds: int) -> str:
+    if kind == "dataset":
+        return f"/v1/datasets/{ds}"
+    ((ws,),) = _sql(settings, "SELECT workspace_id FROM datasets WHERE id = %s", (ds,))
+    return f"/v1/workspaces/{ws}"
+
+
+def _claim_prep(settings, worker="w-crashed"):
+    """A worker leases the preparation job and then dies without finishing it."""
+    from sparrow_finetune.features import PREP_PIPELINE
+    from sparrow_finetune.jobs import JobQueue
+
+    job = JobQueue(settings.database_url).claim(
+        worker, {"cpu"}, 60, pipelines=[PREP_PIPELINE]
+    )
+    assert job is not None and job.pipeline == PREP_PIPELINE, job
+    return job
+
+
+@pytest.mark.parametrize("kind", ["dataset", "workspace"])
+def test_completed_preparation_only_deletes_without_include_models(dino, kind):
+    client, s, reg = dino
+    ds = upload_dataset(client, syn(f"pd-{kind}-"))
+    snap = prepared_snapshot(client, s, reg, ds)
+    assert get_job(client, snap["features"]["job_id"])["state"] == "succeeded"
+    path = _deletion_target(client, s, kind, ds)
+
+    preview = client.get(f"{path}/deletion").json()
+    r = client.delete(path)
+    assert r.status_code == 200, r.text
+    assert client.get(f"/v1/datasets/{ds}").status_code == 404
+    # The preview lists "training jobs" and models; a preparation run is neither.
+    assert (preview["jobs"], preview["models"], preview["active_jobs"]) == (0, [], []), preview
+
+
+@pytest.mark.parametrize("phase", ["queued", "running"])
+def test_active_preparation_still_blocks_deletion(dino, phase):
+    client, s, _reg = dino
+    ds = upload_dataset(client, syn(f"pa-{phase}-"))
+    job_id = new_snapshot(client, ds, prepare_features=True)["features"]["job_id"]
+    if phase == "running":
+        _claim_prep(s)
+    assert get_job(client, job_id)["state"] == phase
+
+    assert client.get(f"/v1/datasets/{ds}/deletion").json()["active_jobs"] == [job_id]
+    r = client.delete(f"/v1/datasets/{ds}", params={"include_models": "true"})
+    assert r.status_code == 409 and str(job_id) in r.json()["detail"], r.text
+    assert client.get(f"/v1/datasets/{ds}").status_code == 200
+
+
+def test_prepared_dataset_with_real_training_still_needs_include_models(dino):
+    client, s, reg = dino
+    ds = upload_dataset(client, syn("pt-"))
+    snap = prepared_snapshot(client, s, reg, ds)
+    job = train(client, s, reg, "conventional_classifier", snap["id"], CONV)
+    (model,) = models_for_job(client, job["id"])
+
+    preview = client.get(f"/v1/datasets/{ds}/deletion").json()
+    assert preview["jobs"] == 1, preview  # the training job only, not the preparation
+    assert [m["id"] for m in preview["models"]] == [model["id"]], preview
+    r = client.delete(f"/v1/datasets/{ds}")
+    assert r.status_code == 409 and "include_models" in r.json()["detail"], r.text
+    assert client.get(f"/v1/datasets/{ds}").status_code == 200
+
+    r = client.delete(f"/v1/datasets/{ds}", params={"include_models": "true"})
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"]["models"] == 1, r.json()
+
+
+def test_failed_preparation_is_reported_blocks_training_and_a_retry_recovers(
+    dino, settings, tmp_path
+):
+    client, s, reg = dino
+    ds = upload_dataset(client, syn("pf-"))
+    snap = new_snapshot(client, ds, prepare_features=True)
+    first = snap["features"]["job_id"]
+
+    # A worker configured with a different encoder claims the job and must fail it.
+    other = write_mean_rgb_onnx(tmp_path / "enc-other" / "encoder.onnx", flatten=False)
+    sb = settings_with_embedder(settings, f"onnx:{other}")
+    assert run_once(sb, "w-wrong", {"cpu"}, registry=builtin_registry(sb)) is True
+    failed = get_job(client, first)
+    assert failed["state"] == "failed" and failed["error"], failed
+    f = snapshot_features(client, snap["id"])
+    assert f["state"] == "failed" and f["job_id"] == first, f
+    assert "retry" in f["message"].lower(), f
+    r = submit(client, "dinov3_linear", snap["id"], DINO)
+    assert r.status_code == 422 and "Data Preparation" in r.json()["detail"], r.text
+
+    r = client.post(f"/v1/jobs/{first}/retry")
+    assert r.status_code == 201, r.text
+    second = r.json()["id"]
+    f = snapshot_features(client, snap["id"])
+    assert (f["state"], f["job_id"]) == ("queued", second), f
+    assert run_once(s, "w-right", {"cpu"}, registry=reg) is True
+    f = snapshot_features(client, snap["id"])
+    assert (f["state"], f["done"]) == ("ready", f["to_compute"]), f
+    train(client, s, reg, "dinov3_linear", snap["id"], DINO)
+
+
+def test_cancelled_preparation_can_be_retried_to_ready(dino):
+    client, s, reg = dino
+    ds = upload_dataset(client, syn("pc-"))
+    snap = new_snapshot(client, ds, prepare_features=True)
+    job_id = snap["features"]["job_id"]
+    assert client.post(f"/v1/jobs/{job_id}/cancel").status_code == 200
+    f = snapshot_features(client, snap["id"])
+    assert f["state"] == "cancelled" and "retry" in f["message"].lower(), f
+    assert run_once(s, "w-idle", {"cpu"}, registry=reg) is False
+
+    assert client.post(f"/v1/jobs/{job_id}/retry").status_code == 201
+    assert run_once(s, "w-prep", {"cpu"}, registry=reg) is True
+    assert snapshot_features(client, snap["id"])["state"] == "ready"
+
+
+def test_preparation_abandoned_by_a_crashed_worker_is_recovered(dino):
+    client, s, reg = dino
+    ds = upload_dataset(client, syn("pr-"))
+    snap = new_snapshot(client, ds, prepare_features=True)
+    job = _claim_prep(s)
+    assert snapshot_features(client, snap["id"])["state"] == "running"
+    _sql(
+        s,
+        "UPDATE jobs SET lease_expires_at = clock_timestamp() - interval '1 second'"
+        " WHERE id = %s",
+        (job.id,),
+    )
+    # The next worker poll reaps the expired lease and finishes the same job.
+    assert run_once(s, "w-next", {"cpu"}, registry=reg) is True
+    done = get_job(client, job.id)
+    assert done["state"] == "succeeded" and done["attempts"] == 2, done
+    f = snapshot_features(client, snap["id"])
+    assert (f["state"], f["job_id"]) == ("ready", job.id), f
+    assert set(tags(feature_prep(client, ds)).values()) == {"valid"}
