@@ -34,22 +34,30 @@ The [user manual](docs/user-manual.md) describes what you can deploy today.
 
 ## A look inside
 
-![A completed classifier job showing preparation, training, evaluation and export stages above the training curves](docs/media/training-job.webp)
+[![A trail-camera photograph of a deer standing in dappled light, with its labelled box selected in the Fine-Tune editor](docs/media/review-boxes.webp)](docs/media/review-boxes.webp)
 
-*The Jobs page shows where a run finished and how its measurements changed. These
-screens use synthetic demonstration data; the displayed scores aren't field benchmarks.*
+*Reviewing a deer annotation before training. The box and species label come from the
+published dataset; they are not model predictions.*
 
 <details>
-<summary><strong>Watch the workflow in three screens</strong> (animated GIF)</summary>
+<summary><strong>See three annotated camera-trap photographs</strong> (animated GIF)</summary>
 
-![Animated tour: edit a labelled box, inspect a finished training job, then open a model card](docs/media/workflow-tour.gif)
+![The box editor showing a deer in woodland, a bobcat in a sandy wash, and a coyote crossing a road at night](docs/media/workflow-tour.gif)
 
 </details>
 
-| Review the training data | Decide what to do with a model |
+Field photographs: [Caltech Camera Traps](https://lila.science/datasets/caltech-camera-traps/),
+[CDLA-Permissive 1.0](https://cdla.dev/permissive-1-0/).
+[Deer](https://storage.googleapis.com/public-datasets-lila/caltech-unzipped/cct_images/59b7a938-23d2-11e8-a6a3-ec086b02610b.jpg)
+and [bobcat](https://storage.googleapis.com/public-datasets-lila/caltech-unzipped/cct_images/59aadcc0-23d2-11e8-a6a3-ec086b02610b.jpg): Justin Brown.
+[Coyote](https://storage.googleapis.com/public-datasets-lila/caltech-unzipped/cct_images/58a52f6e-23d2-11e8-a6a3-ec086b02610b.jpg): Erin Boydston.
+
+| Follow a training job | Decide what to do with a model |
 |---|---|
-| [![Box editor with a selected bounding box and species label](docs/media/review-boxes.webp)](docs/media/review-boxes.webp) | [![Model card with starting weights, evaluation metrics and an option to reuse the classifier](docs/media/model-card.webp)](docs/media/model-card.webp) |
-| Correct the location and species before creating a snapshot. | Check **Started from**, download the artifact or use this version as the base for another run. |
+| [![Completed classifier job showing training curves and export status](docs/media/training-job.webp)](docs/media/training-job.webp) | [![Model card with starting weights, evaluation metrics and an option to reuse the classifier](docs/media/model-card.webp)](docs/media/model-card.webp) |
+| Check the training curves and whether export succeeded. | Check **Started from**, download the artifact or use this version as the base for another run. |
+
+The job and model screens show separate software test runs, not accuracy on the wildlife photographs above.
 
 ## Quick start
 
