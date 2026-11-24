@@ -17,6 +17,7 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from ..base_models import check_base_model, check_parent_model, reuse_preview, tag_model
+from .. import features as features_mod
 from ..db import connect
 from ..jobs import TERMINAL_STATES, AlreadyRetried, JobQueue
 from ..jsonsafe import find_non_finite, sanitise_non_finite
@@ -90,6 +91,8 @@ def list_stock_models(request: Request):
 @router.post("/jobs", status_code=201)
 def submit_job(body: JobIn, request: Request):
     trainer = request.app.state.registry.get(body.pipeline)
+    if trainer is not None and getattr(trainer, "internal", False):
+        trainer = None  # Data Preparation is queued by snapshots, never submitted directly
     if trainer is None:
         if body.pipeline in PLANNED_PIPELINES:
             raise HTTPException(
@@ -109,6 +112,21 @@ def submit_job(body: JobIn, request: Request):
             f"pipeline {trainer.id!r} trains {trainer.task} models but snapshot "
             f"{body.snapshot_id} is a {snap['task']} dataset",
         )
+    if trainer.id == "dinov3_linear":
+        with connect(request.app.state.settings.database_url) as conn:
+            row = conn.execute(
+                "SELECT features FROM snapshots WHERE id = %s", (body.snapshot_id,)
+            ).fetchone()
+            prepared = features_mod.snapshot_state(
+                conn, request.app.state.settings.data_dir, body.snapshot_id, row["features"]
+            )
+        if prepared["state"] != "ready":
+            raise HTTPException(
+                422,
+                f"dinov3_linear trains on prepared DINO features, but snapshot "
+                f"{body.snapshot_id} is {prepared['state']}: create the snapshot with Data "
+                "Preparation (prepare_features) and wait until it is ready",
+            )
     bad = find_non_finite(body.params)
     if bad is not None:
         raise HTTPException(
@@ -157,6 +175,7 @@ def submit_job(body: JobIn, request: Request):
                 params["parent_model_id"],
                 trainer.id,
                 {k: v for k, v in params.items() if k != "model"} if adopt_arch else params,
+                body.snapshot_id,
             )
         except ValueError as exc:
             raise HTTPException(422, f"invalid params: {exc}") from exc

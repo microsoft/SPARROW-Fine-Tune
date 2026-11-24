@@ -55,6 +55,9 @@ class JobContext:
     # Warm start (``base_model_id``): {"id", "model_arch", "labels", "path", "sha256"} of the staged
     # base bundle, set by the worker before ``prepare``; None for a cold start.
     base_model: Optional[dict] = None
+    # ``dinov3_linear``: the snapshot's prepared DINO features ({"vectors", "embedder", "input"}),
+    # set by the worker before ``prepare``; training then never runs the encoder.
+    prepared_features: Optional[dict] = None
 
     def emit(self, stage: str, message: str = "", **metrics: Any) -> None:
         self._emit(stage, message, metrics)
@@ -86,6 +89,57 @@ class Trainer(ABC):
 
     @abstractmethod
     def export(self, ctx: JobContext) -> ExportResult: ...
+
+
+# First-run choices shown with the catalogue. Only the DINO linear head is recommended.
+PIPELINE_METADATA: dict[str, dict] = {
+    "dinov3_linear": {
+        "recommended": True,
+        "encoder": "frozen",
+        "head": "random",
+        "device": "cpu",
+        "requires_feature_preparation": True,
+    },
+    "conventional_classifier": {
+        "recommended": False,
+        "architectures": [
+            {"id": "resnet50", "weights": "imagenet", "default": True},
+            {"id": "efficientnet_b0", "weights": "imagenet", "default": False},
+        ],
+    },
+    "yolo_detector": {"recommended": False},
+}
+
+
+class FeaturePrepTrainer(Trainer):
+    """Data Preparation for DINO: computes a snapshot's crop features (see ``features``).
+
+    Internal: queued when an opt-in snapshot has crops to compute; the worker runs it through
+    ``features.run_preparation`` instead of the train/evaluate/export stages."""
+
+    id = "dinov3_features"
+    name = "DINO feature preparation"
+    task = "classification"
+    requires: frozenset = frozenset()
+    internal = True
+    feature_prep = True
+
+    def validate_params(self, params: dict) -> dict:
+        size = (params or {}).get("input_size", 224)
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or not 32 <= size <= 1024
+        ):
+            raise ValueError("input_size must be an integer between 32 and 1024")
+        return {"input_size": size}
+
+    def _not_a_training_job(self, ctx: JobContext):
+        raise RuntimeError(
+            "dinov3_features is run by the worker's feature preparation path"
+        )
+
+    prepare = train = evaluate = export = _not_a_training_job
 
 
 class Registry:
@@ -127,12 +181,15 @@ class Registry:
             for pid, p in PLANNED_PIPELINES.items()
         }
         for t in self._trainers.values():
+            if getattr(t, "internal", False):
+                continue  # Data Preparation: queued by snapshots, never submitted
             out[t.id] = {
                 "id": t.id,
                 "name": getattr(t, "name", t.id),
                 "task": t.task,
                 "status": "available",
                 "requires": sorted(t.requires),
+                **PIPELINE_METADATA.get(t.id, {}),
             }
         return list(out.values())
 
@@ -273,6 +330,12 @@ def register_builtin_pipelines(registry: Registry, settings: Any) -> None:
         lambda: DinoV3LinearTrainer(
             lambda: make_embedder(spec), weights_dir=weights_dir
         ),
+    )
+    # The encoder is needed where features are computed: Data Preparation, not training.
+    install(
+        FeaturePrepTrainer.id,
+        ("embedder", spec),
+        FeaturePrepTrainer,
         unavailable_reason=None if spec else "SPARROW_FT_EMBEDDER is not set",
     )
 

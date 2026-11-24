@@ -34,7 +34,7 @@ filled-in file.
 | `SPARROW_FT_AUTH_DISABLED` | `1` | `1`: no sign-in, anyone who reaches the port can use the app (intended for use behind Sparrow Studio on a private network). `0`: require an account (`create-user`) or an API token. |
 | `SPARROW_FT_COOKIE_SECURE` | `0` | Set `1` when served over HTTPS. |
 | `SPARROW_FT_SESSION_HOURS` | `12` | Browser session lifetime. |
-| `SPARROW_FT_EMBEDDER` | empty | Image encoder for `dinov3_linear`: `onnx:<path inside the container>` (local ONNX, NCHW float32 input, 224 px) or `engine:<sparrow-engine-url>#<model_id>`. When empty the pipeline is listed but its jobs fail with a configuration error. |
+| `SPARROW_FT_EMBEDDER` | empty | Frozen encoder for DINO feature preparation: `onnx:<container path>` or `engine:<sparrow-engine-url>#<model_id>`. For local ONNX, mount the same encoder read-only at that path in the API and preparation worker. Without an encoder you cannot prepare new DINO features; a training worker can still fit a head on an already-prepared snapshot. |
 | `SPARROW_FT_WEIGHTS_DIR` | empty | Container path of local model weights (section 3). |
 | `SPARROW_FT_GPU_PIPELINES` | empty | Pipelines that only run on a GPU worker, e.g. `yolo_detector,conventional_classifier`. Without a GPU worker their jobs wait with "No GPU worker online". |
 | `SPARROW_FT_MAX_RUNNING_PER_USER` | `0` | Cap on one user's running jobs (`0` = no cap). |
@@ -92,59 +92,45 @@ and `SPARROW_FT_WEIGHTS_DIR=/weights` in `.env.service`. Then start with
 
 Datasets and snapshots can be exported as VOC, COCO or Camtrap DP.
 
-### Starting from your own image classifier (no Studio needed)
+### Choosing how the first model is trained
 
-The image classifier pipeline (`conventional_classifier`) uses timm (PyTorch Image Models), a
-library that provides many image-classifier architectures under short names such as
-`resnet50` or `efficientnet_b0`. Without a base model the job trains `resnet50`. It can instead
-start from classifier weights you trained elsewhere. The packages validated for this release
-name `resnet50` or `efficientnet_b0`. A package for another timm architecture is checked the
-same way, but an architecture name alone is not a promise that it imports or trains.
+A first fine-tune on a dataset has two choices on the **Data** page:
 
-Build a package with Sparrow Uploader:
+- **DINOv3 linear (`dinov3_linear`), marked Recommended.** It trains a new, randomly
+  initialised linear head on a frozen DINOv3 encoder. Because the encoder is not trained, it is
+  usually faster than full fine-tuning and can run on a CPU worker. Speed and accuracy depend on
+  the data and the hardware; neither is promised. It needs DINO features prepared with the
+  snapshot (see "Preparing DINO features" below).
+- **Image classifier (`conventional_classifier`)** with ImageNet starting weights. Pick the
+  architecture under **Architecture (ImageNet starting weights)**: `resnet50` (the default) or
+  `efficientnet_b0`, the two choices `GET /v1/pipelines` lists in `architectures`. The job sends
+  the choice as `params.model`.
 
-```bash
-sparrow-uploader prepare-finetune --weights classifier.safetensors --labels labels.txt --output package.zip
-```
+Later jobs can start from a model trained here instead (next sections). Models from the model
+zoo are for browsing, downloading and running, not as a training starting point.
 
-Then, with the image classifier pipeline selected, choose the `.zip` under **Base model →
-Your own image classifier (local package)**, and click **Upload and use**. The package then
-appears in the picker below it for later jobs. The job trains the architecture the package
-names (for example `efficientnet_b0`) when the job parameters leave `model` out; a different
-`model` in the job parameters is refused. The new version records the architecture it trained
-as `model_arch` in its metadata. If
-the package's labels match the snapshot's labels in the same order, the classifier head is
-reused; otherwise the head is re-initialised and only the backbone is loaded.
+### Preparing DINO features
 
-The service accepts only this package format (`sparrow-finetune/base-v1`) and checks it in
-full before storing anything:
+The DINOv3 pipeline trains on DINO features computed once per crop and cached. Under **Data
+Preparation**, a classification dataset shows the cache state of every image or crop with a
+tag (**Cached**, **To compute**, **Stale: recompute**, **Corrupt: recompute**) and the counts.
+When every crop is cached, the panel says there is no new data and nothing to compute.
 
-- The ZIP has exactly two uncompressed members: `manifest.json` and `weights.safetensors`.
-- `manifest.json` gives `schema`, `pipeline: conventional_classifier`,
-  `model_arch` (for example `resnet50` or `efficientnet_b0`), `labels`, and
-  `files["weights.safetensors"]` (its sha256).
-- `manifest.json` is at most 16 MiB, the same limit Sparrow Uploader writes to.
-- Labels: 2 to 100,000 distinct, non-blank names of at most 256 characters each. They have
-  no surrounding whitespace and no control characters, and their count must match the
-  classifier head.
-- `weights.safetensors` (at most 1 GiB) must hold exactly the tensor names, shapes and dtypes
-  of the timm model that `model_arch` names, with finite values only. The architecture is
-  read from the manifest, never guessed from the tensors.
+Tick **Prepare DINO features with this snapshot** (off by default) before **Create immutable
+snapshot**. A progress pane appears at once and follows the real preparation (crops computed,
+crops reused) until it is ready or fails. If no crop needs computing, it reports that nothing
+was computed. On failure, **Retry DINO preparation** creates a prepared snapshot again; crops
+already cached are reused. Snapshots created without the box get no DINO work at all, and a
+DINOv3 job on such a snapshot is refused with a pointer to Data Preparation. Switching to
+another dataset stops showing the previous dataset's progress.
 
-Pickle files (`.pt`, `.pth`) and any other code are rejected, and nothing in the package
-is executed. Uploading the same bytes again returns the existing base model. A rejected package
-returns HTTP 422 with the reason.
+API: `GET /v1/datasets/{id}/feature-prep` returns `{"items", "counts", "to_compute",
+"message"}` (classification datasets only); `POST /v1/datasets/{id}/snapshots` with
+`{"prepare_features": true}` returns the snapshot with `features` (`state`, `total`,
+`to_compute`, `reused`, `done`, `job_id`, `message`); `GET /v1/snapshots/{id}/features`
+reports the same progress, or `{"state": "not_prepared"}`.
 
-To upload without the web app:
-
-```bash
-curl -H "Authorization: Bearer $TOKEN" -F file=@package.zip http://host:8000/v1/base-models/local
-```
-
-Then start the job with `{"params": {"base_model_id": <id>}}`; the job uses the package's
-architecture. Local upload works with or without Studio.
-
-**Privacy on a shared install.** Uploaded packages, datasets and trained models are stored in
+**Privacy on a shared install.** Datasets and trained models are stored in
 this service only. They are not linked to any Studio project, and nothing is uploaded to the
 model zoo. Everyone who can sign in to the same service can see the workspaces they share.
 
@@ -259,7 +245,8 @@ All routes are under `/v1`. The OpenAPI schema is at `/openapi.json`, with inter
 | Pipelines, jobs | `GET /pipelines`, `POST /jobs`, `/jobs/{id}`, `/jobs/{id}/events`, `/jobs/{id}/stream` (server-sent events), `cancel`, `retry` |
 | Models | `/models`, `/models/{id}`, `/models/{id}/artifact`, `GET /models/{id}/reuse?snapshot_id=`, `POST /models/{id}/activate`, `/deployments`, `/stock-models` |
 | Catalogue | `GET /catalog`, `POST /catalog/models/{id}/download` (one model) |
-| Base models (warm start) | `GET /base-models`, `POST /base-models/local` (multipart field `file`: a classifier package, section 4), `POST /connectors/studio/models/import` |
+| Base models (warm start) | `GET /base-models`, `POST /connectors/studio/models/import` |
+| DINO features | `GET /datasets/{id}/feature-prep`, `POST /datasets/{id}/snapshots` with `{"prepare_features": true}`, `GET /snapshots/{id}/features` |
 
 ## 7. Command line
 

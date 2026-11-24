@@ -811,7 +811,9 @@ def store(settings, project: str, studio_id: str, facts: dict) -> tuple[dict, bo
 
 def list_all(database_url: str) -> list[dict]:
     with connect(database_url) as conn:
-        rows = conn.execute(f"SELECT {COLUMNS} FROM base_models ORDER BY id").fetchall()
+        rows = conn.execute(
+            f"SELECT {COLUMNS} FROM base_models WHERE origin <> 'local' ORDER BY id"
+        ).fetchall()
     return [public(r) for r in rows]
 
 
@@ -980,13 +982,17 @@ def _model_row(database_url: str, model_id: int) -> Optional[dict]:
         ).fetchone()
 
 
-def _encoder_mismatch(settings, model_id: int, manifest: dict) -> Optional[str]:
-    """Why a DINOv3 parent's head cannot be reused with this service's encoder (or ``None``).
-
-    An unset or unreadable encoder spec is not judged here; the worker checks it again."""
-    from .embedders import embedder_identity
-
-    current = embedder_identity(getattr(settings, "embedder", "") or "")
+def _encoder_mismatch(settings, model_id: int, manifest: dict, snapshot_id: int) -> Optional[str]:
+    """Compare the parent with the frozen snapshot, not today's worker configuration."""
+    with connect(settings.database_url) as conn:
+        row = conn.execute("SELECT features FROM snapshots WHERE id = %s", (snapshot_id,)).fetchone()
+    features = (row or {}).get("features") or {}
+    if not features:
+        return "DINO features must be prepared for this snapshot in Data Preparation"
+    current = features["encoder_hash"]
+    size = (manifest.get("input") or {}).get("size")
+    if size is not None and features["input_size"] != size:
+        return f"model {model_id} was prepared with a different encoder input size ({size} pixels)"
     trained = manifest.get("embedder") or {}
     if current is None or current == trained.get("model_hash"):
         return None
@@ -996,7 +1002,7 @@ def _encoder_mismatch(settings, model_id: int, manifest: dict) -> Optional[str]:
     )
 
 
-def check_parent_model(settings, model_id: int, pipeline: str, params: dict) -> dict:
+def check_parent_model(settings, model_id: int, pipeline: str, params: dict, snapshot_id: int) -> dict:
     """Raise ``ValueError`` unless finished model ``model_id`` can be the parent of the job."""
     row = _model_row(settings.database_url, model_id)
     if row is None:
@@ -1016,7 +1022,7 @@ def check_parent_model(settings, model_id: int, pipeline: str, params: dict) -> 
                 f"pick model={arch!r} or another parent model"
             )
     else:
-        mismatch = _encoder_mismatch(settings, model_id, manifest)
+        mismatch = _encoder_mismatch(settings, model_id, manifest, snapshot_id)
         if mismatch:
             raise ValueError(mismatch)
     return {**row, "model_arch": manifest.get("model_arch")}
@@ -1106,7 +1112,7 @@ def reuse_preview(settings, model_id: int, snapshot_id: int) -> Optional[dict]:
             f"the labels differ (model: {_few(parent_labels)}; snapshot: {_few(labels)}): "
             "the backbone is reused and the classifier head is re-initialised",
         )
-    mismatch = _encoder_mismatch(settings, model_id, manifest)
+    mismatch = _encoder_mismatch(settings, model_id, manifest, snapshot_id)
     if mismatch:
         return out(False, False, False, mismatch)
     shared = set(parent_labels) & set(labels)

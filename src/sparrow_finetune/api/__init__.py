@@ -18,7 +18,7 @@ from ..config import Settings
 from ..connectors import studio
 from ..jsonsafe import sanitise_non_finite
 from ..pipelines import Registry, default_registry
-from . import catalog, datasets, jobs, local_models
+from . import catalog, datasets, jobs
 from .security import audit_router, auth_router, require_auth
 
 log = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ def create_app(
     app.include_router(audit_router, prefix="/v1", dependencies=protected)
     app.include_router(datasets.router, prefix="/v1", dependencies=protected)
     app.include_router(jobs.router, prefix="/v1", dependencies=protected)
-    app.include_router(local_models.router, prefix="/v1", dependencies=protected)
+    # First release: no user local base-model upload (POST /v1/base-models/local is not served).
     app.include_router(catalog.router, prefix="/v1", dependencies=protected)
     app.include_router(studio.router, prefix="/v1", dependencies=protected)
 

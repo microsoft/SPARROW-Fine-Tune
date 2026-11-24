@@ -17,7 +17,9 @@ from pydantic import BaseModel, Field, FiniteFloat
 from starlette.concurrency import run_in_threadpool
 
 from .. import assist, camtrapdp, coco, interchange, voc
+from .. import features as features_mod
 from ..db import OBJECTS_LOCK, connect
+from ..embedders import embedder_identity
 from ..storage import LocalObjectStore
 from .security import principal_name, record_audit
 
@@ -1051,7 +1053,10 @@ class SnapshotIn(BaseModel):
     # Optional guard for ``"exclude"``: the ``needs_boxes`` names the user agreed to leave out
     # (from ``GET .../crop-prep``). Any other image needing a box (added meanwhile) is a 409.
     exclude_images: Optional[list[str]] = None
-
+    # Opt-in DINO Data Preparation (classification only): a worker with the encoder computes the
+    # crops' features once; dinov3_linear training then reads them. Off by default.
+    prepare_features: bool = False
+    feature_input_size: Optional[int] = Field(default=None, ge=32, le=1024)
 
 _SNAPSHOT_ROWS_SQL = """
     SELECT i.name, i.object_key, i.sha256, i.width, i.height, i.source, it.group_name,
@@ -1083,6 +1088,10 @@ def create_snapshot(
         ).fetchone()
         if dataset is None:
             raise HTTPException(404, f"dataset {dataset_id} not found")
+        encoder_hash = None
+        input_size = body.feature_input_size or features_mod.DEFAULT_INPUT_SIZE
+        if body.prepare_features:
+            encoder_hash = _feature_encoder(request, dataset, input_size=input_size)
         rows = conn.execute(_SNAPSHOT_ROWS_SQL, (dataset_id,)).fetchall()
         if not rows:
             raise HTTPException(
@@ -1148,11 +1157,129 @@ def create_snapshot(
                     for pos, (c, r) in enumerate(canon)
                 ],
             )
+        prepared = None
+        if body.prepare_features:
+            settings = request.app.state.settings
+            checked = features_mod.statuses(
+                conn,
+                settings.data_dir,
+                features_mod.snapshot_crops(conn, snap["id"]),
+                encoder_hash,
+                input_size,
+            )
+            total = len(checked)
+            to_compute = sum(1 for c in checked if c["status"] != "valid")
+            job_id = None
+            if to_compute:
+                job_id = conn.execute(
+                    "INSERT INTO jobs (pipeline, snapshot_id, params, requires, submitted_by)"
+                    " VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                    (
+                        features_mod.PREP_PIPELINE,
+                        snap["id"],
+                        Jsonb({"input_size": input_size}),
+                        [],
+                        principal_name(request),
+                    ),
+                ).fetchone()["id"]
+            meta = {
+                "encoder_hash": encoder_hash,
+                "input_size": input_size,
+                "total": total,
+                "to_compute": to_compute,
+                "reused": total - to_compute,
+                "job_id": job_id,
+            }
+            conn.execute(
+                "UPDATE snapshots SET features = %s WHERE id = %s", (Jsonb(meta), snap["id"])
+            )
+            prepared = {
+                "state": "queued" if to_compute else "ready",
+                "total": total,
+                "to_compute": to_compute,
+                "reused": total - to_compute,
+                "done": 0,
+                "job_id": job_id,
+                "message": (
+                    f"Data Preparation queued: DINO features for {to_compute} of {total} crop(s)"
+                    f" will be computed by a worker with the encoder; {total - to_compute}"
+                    " prepared vector(s) are reused."
+                    if to_compute
+                    else f"Nothing to compute: all {total} crop(s) already have prepared DINO"
+                    " features. The snapshot is ready for training."
+                ),
+            }
     return {
         **snap,
+        "features": prepared,
         "left_out": len(needs) + len(plan["unlabelled"]),
         "excluded_without_boxes": needs,
     }
+
+
+def _feature_encoder(request: Request, dataset: dict, *, required: bool = True,
+                     input_size: int = features_mod.DEFAULT_INPUT_SIZE) -> Optional[str]:
+    """The encoder identity Data Preparation uses for ``dataset``; 422 when it cannot apply."""
+    if dataset["task"] != "classification":
+        raise HTTPException(
+            422,
+            "DINO Data Preparation applies to classification datasets only;"
+            f" this dataset's task is {dataset['task']}",
+        )
+    spec = request.app.state.settings.embedder
+    if spec and spec.startswith("engine:") and input_size != features_mod.DEFAULT_INPUT_SIZE:
+        raise HTTPException(422, "Engine controls its encoder preprocessing; a custom input size requires local ONNX")
+    encoder_hash = embedder_identity(spec)
+    if encoder_hash is None and required:
+        raise HTTPException(
+            422,
+            "DINO Data Preparation needs the encoder: SPARROW_FT_EMBEDDER is not set or"
+            " names a missing model",
+        )
+    return encoder_hash
+
+
+@router.get("/datasets/{dataset_id}/feature-prep")
+def feature_prep(dataset_id: int, request: Request, input_size: Optional[int] = None):
+    """Per-crop DINO feature status (valid / missing / stale / corrupt) for the next snapshot."""
+    if input_size is not None and not 32 <= input_size <= 1024:
+        raise HTTPException(422, "input_size must be between 32 and 1024")
+    with connect(_url(request)) as conn:
+        dataset = _dataset_or_404(conn, dataset_id)
+        encoder_hash = _feature_encoder(request, dataset, required=False,
+                                        input_size=input_size or features_mod.DEFAULT_INPUT_SIZE)
+        if encoder_hash is None:
+            return {
+                "available": False,
+                "message": "DINO feature preparation is unavailable: configure the frozen encoder first.",
+                "items": [],
+            }
+        rows = conn.execute(_SNAPSHOT_ROWS_SQL, (dataset_id,)).fetchall()
+        kept = _crop_plan(dataset, rows)["kept"] if rows else []
+        checked = features_mod.statuses(
+            conn,
+            request.app.state.settings.data_dir,
+            features_mod.crops(kept),
+            encoder_hash,
+            input_size or features_mod.DEFAULT_INPUT_SIZE,
+        )
+    return {
+        **features_mod.summary(checked),
+        "input_size": input_size or features_mod.DEFAULT_INPUT_SIZE,
+    }
+
+
+@router.get("/snapshots/{snapshot_id}/features")
+def snapshot_features(snapshot_id: int, request: Request):
+    with connect(_url(request)) as conn:
+        row = conn.execute(
+            "SELECT features FROM snapshots WHERE id = %s", (snapshot_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"snapshot {snapshot_id} not found")
+        return features_mod.snapshot_state(
+            conn, request.app.state.settings.data_dir, snapshot_id, row["features"]
+        )
 
 
 def _crop_plan(dataset: dict, rows: list) -> dict:

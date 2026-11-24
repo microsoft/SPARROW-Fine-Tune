@@ -33,8 +33,9 @@ router = APIRouter()
 MODEL_DIR_NAME = "engine-models"
 INSTALL_MARKERS = ("manifest.toml", "pipeline.toml", "ensemble.toml")
 ZOO_REASON = (
-    "the Engine catalogue declares no training weights for this model "
-    "(it ships a runtime package only)"
+    "Model Zoo packages are for download and use only, not a training starting point "
+    "(the Engine catalogue declares no training weights for this model; it ships a runtime "
+    "package only)"
 )
 MAX_STUDIO_PROJECTS = 20
 MAX_STUDIO_MODELS = 200
