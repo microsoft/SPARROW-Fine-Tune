@@ -1,18 +1,9 @@
 # SPARROW Fine-Tune
 
-**Train a camera-trap model for the species and sites you monitor.** A field team might
-have a season of reviewed photos and a stock classifier that keeps confusing two local
-species. SPARROW Fine-Tune lets the team use those corrections as training data, then
-inspect the per-species results before deciding whether to replace the stock model.
-If the problem is finding animals in the frame rather than naming them, use the same
-workspace to review bounding boxes and train a detector.
-
-Fine-Tune is for wildlife researchers, conservation teams and the people who maintain
-their camera-trap models. We designed the browser workflow so you can train a model on
-your own photos without an engineering background. Once Fine-Tune is running, you can
-review the species labels, choose which examples to train on and start training without
-writing code. When the run finishes, you can see which species the model confuses and
-decide whether to use it or try again with more examples.
+SPARROW Fine-Tune is a toolkit for conservation and ecology practitioners to fine-tune
+AI animal recognition models on their own camera-trap datasets without writing code.
+In your browser, you can review labels, train a model to detect animals or identify
+species, and check its results on held-out photos.
 
 [Screenshots](#a-look-inside) · [Quick start](#quick-start) · [Choose a pipeline](#choose-a-pipeline) · [Studio release preview](#future-release-with-sparrow-studio) · [User manual](docs/user-manual.md)
 
