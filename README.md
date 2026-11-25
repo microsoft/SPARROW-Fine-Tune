@@ -68,8 +68,9 @@ deployed models or send drift alerts.
 
 ## 🚀 Quick start
 
-Install Docker with Compose v2 on the machine you’ll use for training. The CPU setup runs
-the app, database and training worker on that machine without Studio or a GPU.
+Install Docker with Compose v2 on the machine you’ll use for training. **The quick start
+trains on CPU**, even on a machine with a GPU. To train an image classifier or detector
+on NVIDIA hardware, follow [Train on an NVIDIA GPU](#train-on-an-nvidia-gpu).
 
 ```bash
 git clone https://github.com/microsoft/SPARROW-Fine-Tune.git
@@ -86,8 +87,9 @@ curl -fsS http://127.0.0.1:8000/v1/health
 ```
 
 When the health check returns `{"status":"ok","database":"ok"}`, open **<http://127.0.0.1:8000/>**.
-The default installation does not include a DINO encoder. To train a classifier without one,
-choose **Image classifier** before creating a snapshot. The first run needs internet access
+**For the recommended DINOv3 pipeline**, [download and configure the encoder](#set-up-the-dinov3-encoder)
+before creating your first snapshot. Fine-Tune does not download it for you.
+To train without it, choose **Conventional classifier** before creating a snapshot. The first run needs internet access
 to download ImageNet weights unless you [supply local weights](docs/user-manual.md#3-model-weights).
 
 > [!IMPORTANT]
@@ -100,7 +102,7 @@ to download ImageNet weights unless you [supply local weights](docs/user-manual.
 
 | Task | Pipeline | Training setup |
 |---|---|---|
-| Identify species in animal crops | **DINOv3 linear** (recommended if you have an encoder) | Keep the encoder fixed and train a new classification layer on the saved crop features. This step can run on CPU. |
+| Identify species in animal crops | **DINOv3 linear** (recommended; [one-time setup](#set-up-the-dinov3-encoder)) | Keep the encoder fixed and train a new classification layer on the saved crop features. No GPU required. |
 | Identify species in crops or whole photos | **Image classifier** | Start with **ResNet-50** or **EfficientNet-B0** pretrained on ImageNet. We recommend a GPU. |
 | Locate animals in photos | **YOLO11 detector** | Create a **Detection** dataset and train on reviewed bounding boxes. We recommend a GPU. |
 
@@ -157,15 +159,48 @@ in Studio**. The screenshot shows the classifier waiting for installation.
 
 ## 🔧 Configure your installation
 
-| Option | Setup |
-|---|---|
-| **DINO features** | Mount the same compatible encoder read-only in the API and preparation worker. Use the same path in both containers. In `.env.service`, set `SPARROW_FT_EMBEDDER=onnx:/weights/encoder.onnx`, substituting your encoder’s path. See the [Compose mount example](docs/user-manual.md#3-model-weights). |
-| **NVIDIA GPU** | Install the NVIDIA Container Toolkit. In `.env.service`, set `SPARROW_FT_GPU_PIPELINES=yolo_detector,conventional_classifier` and start the GPU worker with the command below. Leave the setting empty on CPU-only installations. |
+### Train on an NVIDIA GPU
+
+Install a compatible NVIDIA driver and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the training machine. Keep `TORCH_VARIANT=cpu` for the CPU services. In `.env.service`, set `SPARROW_FT_GPU_PIPELINES=yolo_detector,conventional_classifier`. Then start the additional CUDA worker and check that PyTorch can see your GPU:
 
 ```bash
-# Add the CUDA worker to the existing CPU installation
-docker compose -f compose.service.yml --env-file .env.service --profile gpu up -d --build
+docker compose -f compose.service.yml --env-file .env.service --profile gpu up -d --build --wait
+docker compose -f compose.service.yml --env-file .env.service exec worker-gpu \
+  python -c 'import torch; print(torch.cuda.get_device_name(0))'
 ```
+
+The second command should print your GPU name. Image-classifier and detector jobs now wait for a GPU worker rather than falling back to CPU. Leave `SPARROW_FT_GPU_PIPELINES` empty on CPU-only installations. The local DINO encoder and linear-head training use CPU; enabling the GPU worker does not change that.
+
+### Set up the DINOv3 encoder
+
+Do this once on the training machine, before creating a DINO snapshot:
+
+1. Sign in to Hugging Face and request access to [Meta’s DINOv3 ViT-S/16 weights](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m). Once approved, install [uv](https://docs.astral.sh/uv/getting-started/installation/) and run these commands **from the Fine-Tune repository folder**. Sign in with the approved account. The export command downloads the weights, converts them to ONNX and checks the output against the original model.
+
+   ```bash
+   uvx --from huggingface_hub hf auth login
+   uv run --locked --with transformers python scripts/e2e/export_dinov3_onnx.py \
+     --out "$HOME/sparrow-encoders/dinov3_vits16.onnx"
+   ```
+
+2. Keep the `.onnx` file and its `.onnx.data` file together. The container user needs read access to both files and access to their directory. In `.env.service`, set `SPARROW_FT_EMBEDDER=onnx:/encoders/dinov3_vits16.onnx`. Save the following as `compose.encoder.yml` beside `compose.service.yml`:
+
+   ```yaml
+   x-encoder: &encoder
+     volumes: ["${HOME}/sparrow-encoders:/encoders:ro"]
+   services:
+     api: *encoder
+     worker-cpu: *encoder
+     worker-gpu: *encoder
+   ```
+
+3. Apply the configuration. Include `-f compose.encoder.yml` whenever you start or recreate these services. If you also use the GPU worker, add `--profile gpu` before `up`.
+
+   ```bash
+   docker compose -f compose.service.yml -f compose.encoder.yml --env-file .env.service up -d --build --wait
+   ```
+
+   In **Prepare data**, select **DINOv3 linear** and create a snapshot with labeled crops. Wait for **Feature extracted** before starting training. You do not need a Hugging Face token in the running service.
 
 ### 🔐 Enable sign-in
 
