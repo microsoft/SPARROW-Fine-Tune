@@ -8,9 +8,11 @@ If the problem is finding animals in the frame rather than naming them, use the 
 workspace to review bounding boxes and train a detector.
 
 Fine-Tune is for wildlife researchers, conservation teams and the people who maintain
-their camera-trap models. A reviewer can correct labels in a browser; a model maintainer
-can train from that exact set of examples, change a setting and compare the two runs.
-Neither needs to write a training script.
+their camera-trap models. We designed the browser workflow so you can train a model on
+your own photos without an engineering background. Once Fine-Tune is running, you can
+review the species labels, choose which examples to train on and start training without
+writing code. When the run finishes, you can see which species the model confuses and
+decide whether to use it or try again with more examples.
 
 [Screenshots](#a-look-inside) · [Quick start](#quick-start) · [Choose a pipeline](#choose-a-pipeline) · [Studio release preview](#future-release-with-sparrow-studio) · [User manual](docs/user-manual.md)
 
