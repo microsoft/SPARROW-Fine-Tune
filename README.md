@@ -17,7 +17,7 @@ We plan to include the full training workflow in a [future Sparrow Studio releas
 
 ### 📂 Prepare training data
 
-[![Prepare training data workspace showing the dataset and pipeline selectors, three annotated wildlife photos awaiting review, and the training snapshot panel on the right](docs/media/prepare-data.webp)](docs/media/prepare-data.webp)
+<a href="docs/media/prepare-data.webp"><img src="docs/media/prepare-data.webp" width="420" alt="Prepare training data workspace showing the dataset and pipeline selectors, three annotated wildlife photos awaiting review, and the training snapshot panel on the right"></a>
 
 Choose your dataset and training pipeline at the top of the page. Under **Review the
 training examples**, confirm or correct labels, or exclude a photo from training. For classifiers that
@@ -25,7 +25,7 @@ use animal crops, check **Training snapshot** for photos that still need a box.
 
 ### 🔍 Review an individual photo
 
-[![A trail-camera photograph of a deer standing in dappled light, with its labelled box selected in the Fine-Tune editor](docs/media/review-boxes.webp)](docs/media/review-boxes.webp)
+<a href="docs/media/review-boxes.webp"><img src="docs/media/review-boxes.webp" width="420" alt="A trail-camera photograph of a deer standing in dappled light, with its labelled box selected in the Fine-Tune editor"></a>
 
 *The editor shows the deer’s box and species label from the original dataset. You can
 change either before training.*
