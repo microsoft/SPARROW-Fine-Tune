@@ -139,24 +139,6 @@ Photos: Justin Brown and Erin Boydston, [Caltech Camera Traps](https://lila.scie
    The preview lists the weights you can reuse. The new model card names the parent under
    **Started from**; the parent stays unchanged.
 
-## 🔭 Future release with Sparrow Studio
-
-We plan to let Studio users train on reviewed project photos and install the resulting
-model in the same project. The screenshots below show a development build. These controls
-are off in the standalone release.
-
-**Import reviewed photos.** Open **Model fine-tune** from a Studio project. Choose
-**Import from Studio** with **Reviewed only** selected. The example shows 40 reviewed
-images imported without copying files by hand.
-
-[![Connected build: Import from Studio with Reviewed only selected and 40 images up to date](docs/media/studio-reviewed-import.webp)](docs/media/studio-reviewed-import.webp)
-
-**Send a model to Studio.** Training a new version leaves the project’s current model
-in place. To use the new version, select the model and project, then choose **Activate
-in Studio**. The screenshot shows the classifier waiting for installation.
-
-[![Connected build: a selected classifier, target Studio project, Activate in Studio button and pending installation status](docs/media/studio-send-model.webp)](docs/media/studio-send-model.webp)
-
 ## 🔧 Configure your installation
 
 ### Train on an NVIDIA GPU
@@ -233,6 +215,24 @@ uv run --no-sync python -m pytest -q tests
 The [user manual](docs/user-manual.md) covers service operations, API routes and the
 legacy YOLO workbench. For help, see [Support](SUPPORT.md). To report a security issue,
 follow the [security policy](SECURITY.md).
+
+## 🔭 Future release with Sparrow Studio
+
+We plan to let Studio users train on reviewed project photos and install the resulting
+model in the same project. The screenshots below show a development build. These controls
+are off in the standalone release.
+
+**Import reviewed photos.** Open **Model fine-tune** from a Studio project. Choose
+**Import from Studio** with **Reviewed only** selected. The example shows 40 reviewed
+images imported without copying files by hand.
+
+[![Connected build: Import from Studio with Reviewed only selected and 40 images up to date](docs/media/studio-reviewed-import.webp)](docs/media/studio-reviewed-import.webp)
+
+**Send a model to Studio.** Training a new version leaves the project’s current model
+in place. To use the new version, select the model and project, then choose **Activate
+in Studio**. The screenshot shows the classifier waiting for installation.
+
+[![Connected build: a selected classifier, target Studio project, Activate in Studio button and pending installation status](docs/media/studio-send-model.webp)](docs/media/studio-send-model.webp)
 
 ## 🤝 Contributing
 
