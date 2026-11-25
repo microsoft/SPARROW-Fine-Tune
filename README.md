@@ -17,31 +17,34 @@ We plan to include the full training workflow in a [future Sparrow Studio releas
 
 ### 📂 Prepare training data
 
-<a href="docs/media/prepare-data.webp"><img src="docs/media/prepare-data.webp" width="500" alt="Prepare training data workspace showing the dataset and pipeline selectors, three annotated wildlife photos awaiting review, and the training snapshot panel on the right"></a>
+<a href="docs/media/add-data.webp"><img src="docs/media/add-data.webp" width="500" alt="Add data panel with controls to upload images, choose a label format, import labels or pre-draw boxes"></a>
 
-Choose your dataset and training pipeline at the top of the page. Under **Review the
-training examples**, confirm or correct labels, or exclude a photo from training. For classifiers that
-use animal crops, check **Training snapshot** for photos that still need a box.
+In **Add data**, choose **Upload images** to add your photos. If you have annotations,
+select their format and choose **Import labels**. You can also use an installed detector
+to draw initial boxes for review.
 
 ### 🔍 Review an individual photo
 
-<a href="docs/media/review-boxes.webp"><img src="docs/media/review-boxes.webp" width="420" alt="A trail-camera photograph of a deer standing in dappled light, with its labelled box selected in the Fine-Tune editor"></a>
-
-*The editor shows the deer’s box and species label from the original dataset. You can
-change either before training.*
-
-<details>
-<summary><strong>See three annotated camera-trap photographs</strong> (animated GIF)</summary>
-
 <a href="docs/media/workflow-tour.gif"><img src="docs/media/workflow-tour.gif" width="640" alt="The box editor showing a deer in woodland, a bobcat in a sandy wash, and a coyote crossing a road at night"></a>
 
-</details>
+Check the box and species label on each photo. You can correct either before training.
+The animation shows annotations from the original dataset.
 
 Field photographs: [Caltech Camera Traps](https://lila.science/datasets/caltech-camera-traps/),
 [CDLA-Permissive 1.0](https://cdla.dev/permissive-1-0/).
 [Deer](https://storage.googleapis.com/public-datasets-lila/caltech-unzipped/cct_images/59b7a938-23d2-11e8-a6a3-ec086b02610b.jpg)
 and [bobcat](https://storage.googleapis.com/public-datasets-lila/caltech-unzipped/cct_images/59aadcc0-23d2-11e8-a6a3-ec086b02610b.jpg): Justin Brown.
 [Coyote](https://storage.googleapis.com/public-datasets-lila/caltech-unzipped/cct_images/58a52f6e-23d2-11e8-a6a3-ec086b02610b.jpg): Erin Boydston.
+
+### 🎛 Configure your training parameters
+
+You can start with the defaults. We kept **Training settings (optional)** to the basics
+most projects need, so you don’t need a machine learning background to train a model.
+The controls depend on the pipeline. For example, you can choose how many passes to make
+over the photos, when to stop if results stop improving, or what share of photos to hold
+back for checking the model.
+
+### 📊 Training jobs and models
 
 | Follow a training job | Decide what to do with a model |
 |---|---|
