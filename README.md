@@ -34,6 +34,16 @@ The [user manual](docs/user-manual.md) describes what you can deploy today.
 
 ## A look inside
 
+### Prepare training data
+
+[![Prepare training data workspace showing the dataset and pipeline selectors, three annotated wildlife photos awaiting review, and the training snapshot panel on the right](docs/media/prepare-data.webp)](docs/media/prepare-data.webp)
+
+Choose the dataset and pipeline at the top. Under **Review the training examples**, confirm,
+correct or exclude individual photos. The **Training snapshot** panel on the right shows
+whether any crops still need boxes before you freeze the examples for a run.
+
+### Review an individual photo
+
 [![A trail-camera photograph of a deer standing in dappled light, with its labelled box selected in the Fine-Tune editor](docs/media/review-boxes.webp)](docs/media/review-boxes.webp)
 
 *Reviewing a deer annotation before training. The box and species label come from the
