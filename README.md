@@ -34,7 +34,7 @@ The [user manual](docs/user-manual.md) describes what you can deploy today.
 
 ## 📷 A look inside
 
-### 🗂️ Prepare training data
+### 📂 Prepare training data
 
 [![Prepare training data workspace showing the dataset and pipeline selectors, three annotated wildlife photos awaiting review, and the training snapshot panel on the right](docs/media/prepare-data.webp)](docs/media/prepare-data.webp)
 
@@ -130,7 +130,7 @@ starting points above. Later runs can start from a compatible classifier you tra
    finished classifier. The preview shows what transfers. The original model stays intact;
    **Started from** on the new model card identifies the parent.
 
-## ⚙️ Configure your installation
+## 🔧 Configure your installation
 
 | Option | Setup |
 |---|---|
@@ -153,7 +153,7 @@ printf '%s\n' "$password" | docker compose -f compose.service.yml --env-file .en
 unset password
 ```
 
-## 🛠️ Development
+## 💻 Development
 
 The FastAPI service and workers share PostgreSQL and a data volume. For the API schema,
 open [interactive API docs](http://127.0.0.1:8000/docs) on your running installation.
@@ -183,7 +183,7 @@ This project has adopted the [Microsoft Open Source Code of Conduct](https://ope
 For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
 contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
-## ⚖️ Trademarks
+## 📜 Trademarks
 
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
 trademarks or logos is subject to and must follow
