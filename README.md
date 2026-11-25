@@ -50,8 +50,8 @@ back for checking the model.
 
 | Follow a training job | Decide what to do with a model |
 |---|---|
-| [![Completed classifier job showing training curves and export status](docs/media/training-job.webp)](docs/media/training-job.webp) | [![DINO classifier model card with starting weights, validation accuracy, log loss, macro-F1 and crop counts](docs/media/model-card.webp)](docs/media/model-results.webp) |
-| Follow the training curves and check the export status. | Check **Started from** and the validation scores. [Open all metrics and the version comparison](docs/media/model-results.webp). |
+| [![Completed classifier job showing training curves and export status](docs/media/training-job.webp)](docs/media/training-job.webp) | [![Compare and activate models: selected classifier, starting weights, validation scores and confidence threshold](docs/media/model-card.webp)](docs/media/model-card.webp) |
+| Follow the training curves and check the export status. | Check **Started from**, the validation scores and the confidence threshold. [Open all metrics: version comparison and version record](docs/media/model-results.webp). |
 
 These screenshots show test runs on other data. The model card comes from a Studio-connected
 test build; the standalone release has no Studio controls. The scores do not measure accuracy on the photos above.
