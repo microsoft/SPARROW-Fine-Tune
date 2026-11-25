@@ -44,14 +44,17 @@ The controls depend on the pipeline. For example, you can choose how many passes
 over the photos, when to stop if results stop improving, or what share of photos to hold
 back for checking the model.
 
+<a href="docs/media/training-settings.webp"><img src="docs/media/training-settings.webp" width="500" alt="Expanded training settings for the conventional image classifier, including training length, early stopping, held-out photos and learning speed"></a>
+
 ### 📊 Training jobs and models
 
 | Follow a training job | Decide what to do with a model |
 |---|---|
-| [![Completed classifier job showing training curves and export status](docs/media/training-job.webp)](docs/media/training-job.webp) | [![Model list and selected DINO classifier showing its starting weights](docs/media/model-card.webp)](docs/media/model-card.webp) |
-| Follow the training curves and check the export status. | **Started from** shows the starting weights, including the parent model if you retrained a classifier. |
+| [![Completed classifier job showing training curves and export status](docs/media/training-job.webp)](docs/media/training-job.webp) | [![DINO classifier model card with starting weights, validation accuracy, log loss, macro-F1 and crop counts](docs/media/model-card.webp)](docs/media/model-results.webp) |
+| Follow the training curves and check the export status. | Check **Started from** and the validation scores. [Open all metrics and the version comparison](docs/media/model-results.webp). |
 
-These two screenshots show test runs on other data. The scores do not measure accuracy on the photos above.
+These screenshots show test runs on other data. The model card comes from a Studio-connected
+test build; the standalone release has no Studio controls. The scores do not measure accuracy on the photos above.
 
 **Compare model versions.** A new run keeps the previous model. In **Models → Compare
 with another version**, select your current model to compare its saved scores with the new
