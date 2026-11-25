@@ -17,7 +17,7 @@ We plan to include the full training workflow in a [future Sparrow Studio releas
 
 ### 📂 Prepare training data
 
-<a href="docs/media/prepare-data.webp"><img src="docs/media/prepare-data.webp" width="420" alt="Prepare training data workspace showing the dataset and pipeline selectors, three annotated wildlife photos awaiting review, and the training snapshot panel on the right"></a>
+<a href="docs/media/prepare-data.webp"><img src="docs/media/prepare-data.webp" width="500" alt="Prepare training data workspace showing the dataset and pipeline selectors, three annotated wildlife photos awaiting review, and the training snapshot panel on the right"></a>
 
 Choose your dataset and training pipeline at the top of the page. Under **Review the
 training examples**, confirm or correct labels, or exclude a photo from training. For classifiers that
