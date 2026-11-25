@@ -110,6 +110,15 @@ classifier you trained in Fine-Tune.
 
 ## 🧠 Train your first model
 
+Watch the five steps below in a standalone Fine-Tune workspace. The recording uses 12
+bobcat and coyote photos and two training passes to show the controls, not to measure
+field accuracy. The training wait is cut out.
+
+<a href="docs/media/first-model.gif"><img src="docs/media/first-model.gif" width="840" alt="Five-step recording: create a classification dataset, upload wildlife photos and COCO labels, save a snapshot, train a classifier, and download the finished model"></a>
+
+Photos: Justin Brown and Erin Boydston, [Caltech Camera Traps](https://lila.science/datasets/caltech-camera-traps/),
+[CDLA-Permissive 1.0](https://cdla.dev/permissive-1-0/).
+
 1. **Create a dataset.** In **Prepare data**, create a workspace and select **+ New dataset**.
    Choose *Classification* to identify species or *Detection* to locate animals. Turning off
    whole-image training changes a classifier’s input to crops; it does not select detection.
