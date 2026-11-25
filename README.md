@@ -58,9 +58,21 @@ and [bobcat](https://storage.googleapis.com/public-datasets-lila/caltech-unzippe
 | Follow a training job | Decide what to do with a model |
 |---|---|
 | [![Completed classifier job showing training curves and export status](docs/media/training-job.webp)](docs/media/training-job.webp) | [![Model list and selected DINO classifier showing its starting weights](docs/media/model-card.webp)](docs/media/model-card.webp) |
-| Check the training curves and whether export succeeded. | Check **Started from**, download the artifact or use this version as the base for another run. |
+| Check the training curves and whether export succeeded. | Check **Started from** to see whether this version began with pretrained weights, a new head or a previous classifier. |
 
 The job and model screens show separate software test runs, not accuracy on the wildlife photographs above.
+
+**Compare model versions.** Each successful training run creates a new version and leaves
+the previous one intact. In **Models → Compare with another version**, pick the version you
+use today to see its recorded validation metrics beside the candidate’s. The table compares
+existing scores; it does not rerun both models on the same photos. Before switching, evaluate
+both on the same held-out images and check the species that matter to your project.
+
+**Investigate drift.** Suppose a camera moves from a forest trail to an open field and starts
+missing deer. Keep the model version fixed and compare its deer recall on reviewed photos
+from before and after the move: of the deer people found, how many did the model find?
+A drop is a reason to inspect the missed photos. Fine-Tune does not monitor deployed models
+for drift or send alerts.
 
 ## 🚀 Quick start
 
