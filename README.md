@@ -12,25 +12,18 @@ their camera-trap models. A reviewer can correct labels in a browser; a model ma
 can train from that exact set of examples, change a setting and compare the two runs.
 Neither needs to write a training script.
 
-[Screenshots](#a-look-inside) · [Quick start](#quick-start) · [Choose a pipeline](#choose-a-pipeline) · [User manual](docs/user-manual.md)
+[Screenshots](#a-look-inside) · [Quick start](#quick-start) · [Choose a pipeline](#choose-a-pipeline) · [Studio release preview](#future-release-with-sparrow-studio) · [User manual](docs/user-manual.md)
 
 ### 🔗 Why a separate app, and how Studio fits
 
-**Already using Sparrow Studio?** Keep reviewing sightings in your Studio project.
-Open **Model fine-tune** to bring reviewed project data into Fine-Tune. Train and
-evaluate a version here, then choose **Activate in Studio** to send it back to the
-project. Starting a training run does not replace the project's active model.
+**This repository releases Fine-Tune as a standalone app.** If your team has a folder of
+camera-trap photos or exported annotations, you can review them, train on your own hardware
+and download the model without setting up a Sparrow Studio project. Studio features are
+turned off in the repository release: you bring the data in and decide where the model goes.
 
-**Working with a folder of photos or exported annotations?** You can start here without
-installing Studio or creating a Studio project. Training runs on workers attached to
-your Fine-Tune installation. Keeping those workers in a separate service lets you use
-the hardware you have for training, whether or not you manage sightings in Studio.
-
-**Project direction.** We intend to keep both entry points: local training and a
-review–train–evaluate loop connected to Studio. The first release focuses on making that
-loop repeatable: keep the original snapshot, record each model's starting weights and
-use a finished classifier again when the next batch of reviewed photos arrives.
-The [user manual](docs/user-manual.md) describes what you can deploy today.
+We also plan to release the **full fine-tuning workflow with Sparrow Studio**. If your team
+already reviews sightings in Studio, you’ll be able to start with that project’s reviewed
+data and send a model back to the same project. [See the Studio release preview](#future-release-with-sparrow-studio).
 
 ## 📷 A look inside
 
@@ -64,7 +57,7 @@ and [bobcat](https://storage.googleapis.com/public-datasets-lila/caltech-unzippe
 
 | Follow a training job | Decide what to do with a model |
 |---|---|
-| [![Completed classifier job showing training curves and export status](docs/media/training-job.webp)](docs/media/training-job.webp) | [![Model card with starting weights, evaluation metrics and an option to reuse the classifier](docs/media/model-card.webp)](docs/media/model-card.webp) |
+| [![Completed classifier job showing training curves and export status](docs/media/training-job.webp)](docs/media/training-job.webp) | [![Model list and selected DINO classifier showing its starting weights](docs/media/model-card.webp)](docs/media/model-card.webp) |
 | Check the training curves and whether export succeeded. | Check **Started from**, download the artifact or use this version as the base for another run. |
 
 The job and model screens show separate software test runs, not accuracy on the wildlife photographs above.
@@ -115,8 +108,8 @@ starting points above. Later runs can start from a compatible classifier you tra
 1. **Choose the task.** In **Prepare data**, create a workspace and choose **+ New dataset**.
    Select *Classification* for species labels or *Detection* for boxes. Turning off
    whole-image classification does not switch a dataset to detection.
-2. **Review the images.** Upload photos and label them, import existing COCO, Pascal VOC or
-   Camtrap DP annotations, or pull reviewed data from Studio. For crop classification, draw
+2. **Review the images.** Upload photos and label them, or import existing COCO, Pascal VOC or
+   Camtrap DP annotations. For crop classification, draw
    missing boxes or use an installed detector to propose boxes for review.
 3. **Choose the pipeline, then create an immutable snapshot.** The snapshot fixes the
    examples for this run. With DINO selected, image cards show **Pending feature** or
@@ -125,10 +118,30 @@ starting points above. Later runs can start from a compatible classifier you tra
 4. **Train and inspect the result.** Start training and follow progress in **Jobs**. In
    **Models**, inspect per-class results and the confusion matrix. If you selected a stock
    classifier for comparison, check where the new classifier gained or lost accuracy.
-5. **Export or iterate.** Download the ONNX bundle, or activate the version in a connected
-   Studio project. To try new data or settings, select **Use as base for new training** on a
+5. **Export or iterate.** Download the ONNX bundle. To try new data or settings,
+   select **Use as base for new training** on a
    finished classifier. The preview shows what transfers. The original model stays intact;
    **Started from** on the new model card identifies the parent.
+
+## 🔭 Future release with Sparrow Studio
+
+The planned Studio release will connect both ends of a training run to your project.
+These screenshots come from a connected development build; the controls shown here
+are not part of the standalone walkthrough above.
+
+**From reviewed sightings to training examples.** Open **Model fine-tune** from your Studio
+project and import the sightings your team has reviewed. You won’t need to export photos
+and labels to a folder first. In this example, Fine-Tune reports that all 40 reviewed
+images have been imported.
+
+[![Connected build: Import from Studio with Reviewed only selected and 40 images up to date](docs/media/studio-reviewed-import.webp)](docs/media/studio-reviewed-import.webp)
+
+**From a finished model back to the project.** Compare versions in Fine-Tune, select the
+one you want to use, then choose **Activate in Studio**. Training a new version alone
+does not change the project’s model. The status below shows that Fine-Tune has sent
+the selected classifier and is waiting for Studio to install it.
+
+[![Connected build: a selected classifier, target Studio project, Activate in Studio button and pending installation status](docs/media/studio-send-model.webp)](docs/media/studio-send-model.webp)
 
 ## 🔧 Configure your installation
 
@@ -136,7 +149,6 @@ starting points above. Later runs can start from a compatible classifier you tra
 |---|---|
 | **DINO features** | Mount a compatible frozen encoder read-only at the same container path in the API and preparation worker. Set `SPARROW_FT_EMBEDDER=onnx:/weights/encoder.onnx` in `.env.service`, using your mounted path. The [weights mount example](docs/user-manual.md#3-model-weights) shows how to start Compose with an override. |
 | **NVIDIA GPU** | Install the NVIDIA Container Toolkit, set `SPARROW_FT_GPU_PIPELINES=yolo_detector,conventional_classifier` in `.env.service`, then start the GPU profile below. Without a GPU worker, leave this setting empty. |
-| **Sparrow Studio** | Use a Studio version with the Fine-Tune connector. Configure the Studio URL and shared service token on the Fine-Tune side, and the browser-facing Fine-Tune URL in Studio. See [both sides of the connection](docs/user-manual.md#5-sparrow-studio-integration-optional). |
 
 ```bash
 # Add the CUDA worker to the existing CPU installation
