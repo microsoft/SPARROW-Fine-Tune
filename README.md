@@ -14,7 +14,7 @@ Neither needs to write a training script.
 
 [Screenshots](#a-look-inside) · [Quick start](#quick-start) · [Choose a pipeline](#choose-a-pipeline) · [User manual](docs/user-manual.md)
 
-### Why a separate app, and how Studio fits
+### 🔗 Why a separate app, and how Studio fits
 
 **Already using Sparrow Studio?** Keep reviewing sightings in your Studio project.
 Open **Model fine-tune** to bring reviewed project data into Fine-Tune. Train and
@@ -32,9 +32,9 @@ loop repeatable: keep the original snapshot, record each model's starting weight
 use a finished classifier again when the next batch of reviewed photos arrives.
 The [user manual](docs/user-manual.md) describes what you can deploy today.
 
-## A look inside
+## 📷 A look inside
 
-### Prepare training data
+### 🗂️ Prepare training data
 
 [![Prepare training data workspace showing the dataset and pipeline selectors, three annotated wildlife photos awaiting review, and the training snapshot panel on the right](docs/media/prepare-data.webp)](docs/media/prepare-data.webp)
 
@@ -42,7 +42,7 @@ Choose the dataset and pipeline at the top. Under **Review the training examples
 correct or exclude individual photos. The **Training snapshot** panel on the right shows
 whether any crops still need boxes before you freeze the examples for a run.
 
-### Review an individual photo
+### 🔍 Review an individual photo
 
 [![A trail-camera photograph of a deer standing in dappled light, with its labelled box selected in the Fine-Tune editor](docs/media/review-boxes.webp)](docs/media/review-boxes.webp)
 
@@ -69,7 +69,7 @@ and [bobcat](https://storage.googleapis.com/public-datasets-lila/caltech-unzippe
 
 The job and model screens show separate software test runs, not accuracy on the wildlife photographs above.
 
-## Quick start
+## 🚀 Quick start
 
 You need Docker with Compose v2. The CPU setup runs the web app, PostgreSQL and a training
 worker on one machine. You don't need Studio or an NVIDIA GPU.
@@ -98,7 +98,7 @@ or [mount the weights for offline use](docs/user-manual.md#3-model-weights).
 > the app, enable sign-in and put an HTTPS reverse proxy in front of it. Users on the same
 > installation share its workspaces.
 
-## Choose a pipeline
+## 🧭 Choose a pipeline
 
 | What you want to learn | Choose | What trains |
 |---|---|---|
@@ -110,7 +110,7 @@ Use the **Model Zoo** to browse runtime models. An ONNX download lets you run pr
 it does not supply the original training weights. For a first classifier, use one of the
 starting points above. Later runs can start from a compatible classifier you trained here.
 
-## Train your first model
+## 🧠 Train your first model
 
 1. **Choose the task.** In **Prepare data**, create a workspace and choose **+ New dataset**.
    Select *Classification* for species labels or *Detection* for boxes. Turning off
@@ -130,7 +130,7 @@ starting points above. Later runs can start from a compatible classifier you tra
    finished classifier. The preview shows what transfers. The original model stays intact;
    **Started from** on the new model card identifies the parent.
 
-## Configure your installation
+## ⚙️ Configure your installation
 
 | Option | Setup |
 |---|---|
@@ -153,7 +153,7 @@ printf '%s\n' "$password" | docker compose -f compose.service.yml --env-file .en
 unset password
 ```
 
-## Development
+## 🛠️ Development
 
 The FastAPI service and workers share PostgreSQL and a data volume. For the API schema,
 open [interactive API docs](http://127.0.0.1:8000/docs) on your running installation.
@@ -169,7 +169,7 @@ See the [user manual](docs/user-manual.md) for operations, API routes and the se
 YOLO workbench. For project help, see [Support](SUPPORT.md); report security issues through
 the [security policy](SECURITY.md).
 
-## Contributing
+## 🤝 Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
 Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
@@ -183,7 +183,7 @@ This project has adopted the [Microsoft Open Source Code of Conduct](https://ope
 For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
 contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
-## Trademarks
+## ⚖️ Trademarks
 
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
 trademarks or logos is subject to and must follow
