@@ -17,7 +17,7 @@ We plan to include the full training workflow in a [future Sparrow Studio releas
 
 ### 📂 Prepare training data
 
-<a href="docs/media/add-data.webp"><img src="docs/media/add-data.webp" width="500" alt="Add data panel with controls to upload images, choose a label format, import labels or pre-draw boxes"></a>
+<a href="docs/media/add-data.webp"><img src="docs/media/add-data.webp" width="840" alt="Add data panel with controls to upload images, choose a label format, import labels or pre-draw boxes"></a>
 
 In **Add data**, choose **Upload images** to add your photos. If you have annotations,
 select their format and choose **Import labels**. You can also use an installed detector
