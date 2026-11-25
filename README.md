@@ -141,7 +141,7 @@ Photos: Justin Brown and Erin Boydston, [Caltech Camera Traps](https://lila.scie
 
 ## 🔧 Configure your installation
 
-### Train on an NVIDIA GPU
+### ⚡ Train on an NVIDIA GPU
 
 Install a compatible NVIDIA driver and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the training machine. Keep `TORCH_VARIANT=cpu` for the CPU services. In `.env.service`, set `SPARROW_FT_GPU_PIPELINES=yolo_detector,conventional_classifier`. Then start the additional CUDA worker and check that PyTorch can see your GPU:
 
@@ -153,7 +153,7 @@ docker compose -f compose.service.yml --env-file .env.service exec worker-gpu \
 
 The second command should print your GPU name. Image-classifier and detector jobs now wait for a GPU worker rather than falling back to CPU. Leave `SPARROW_FT_GPU_PIPELINES` empty on CPU-only installations. The local DINO encoder and linear-head training use CPU; enabling the GPU worker does not change that.
 
-### Set up the DINOv3 encoder
+### 🧩 Set up the DINOv3 encoder
 
 Do this once on the training machine, before creating a DINO snapshot:
 
