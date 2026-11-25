@@ -33,7 +33,7 @@ change either before training.*
 <details>
 <summary><strong>See three annotated camera-trap photographs</strong> (animated GIF)</summary>
 
-![The box editor showing a deer in woodland, a bobcat in a sandy wash, and a coyote crossing a road at night](docs/media/workflow-tour.gif)
+<a href="docs/media/workflow-tour.gif"><img src="docs/media/workflow-tour.gif" width="640" alt="The box editor showing a deer in woodland, a bobcat in a sandy wash, and a coyote crossing a road at night"></a>
 
 </details>
 
