@@ -91,9 +91,10 @@ choose **Image classifier** before creating a snapshot. The first run needs inte
 to download ImageNet weights unless you [supply local weights](docs/user-manual.md#3-model-weights).
 
 > [!IMPORTANT]
-> Sign-in is off by default. Keep the app on `127.0.0.1` for local use. Before giving
-> others access, enable sign-in and use an HTTPS reverse proxy. Users share the workspaces
-> on the same installation.
+> Sign-in is off by default. Keep the app on `127.0.0.1` for local use. To turn sign-in on,
+> change `SPARROW_FT_AUTH_DISABLED` from `1` to `0` in `.env.service`, then
+> [apply the change and create your first account](#enable-sign-in).
+> Before sharing the app, put it behind an HTTPS reverse proxy. Signed-in users share workspaces.
 
 ## 🧭 Choose a pipeline
 
@@ -157,9 +158,12 @@ in Studio**. The screenshot shows the classifier waiting for installation.
 docker compose -f compose.service.yml --env-file .env.service --profile gpu up -d --build
 ```
 
-To require sign-in, set `SPARROW_FT_AUTH_DISABLED=0` in `.env.service`. Behind an HTTPS
-proxy, set `SPARROW_FT_COOKIE_SECURE=1`. Run these Bash commands to apply the settings
-and create an account:
+### 🔐 Enable sign-in
+
+In `.env.service`, set `SPARROW_FT_AUTH_DISABLED=0`. Leave `SPARROW_FT_COOKIE_SECURE=0`
+for local HTTP. If users connect through an HTTPS reverse proxy, set `SPARROW_FT_COOKIE_SECURE=1`.
+From the repository folder, run these Bash commands to apply the change and create the `admin`
+account. Enter a password of at least eight characters at the prompt:
 
 ```bash
 docker compose -f compose.service.yml --env-file .env.service up -d
@@ -167,6 +171,8 @@ read -rs -p 'New admin password: ' password; echo
 printf '%s\n' "$password" | docker compose -f compose.service.yml --env-file .env.service exec -T api sparrow-finetune create-user admin
 unset password
 ```
+
+Open the app in a private browser window and sign in as `admin` with the password you chose.
 
 ## 💻 Development
 
